@@ -1,0 +1,569 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  OWNER
+  MANAGER
+  RECEPTIONIST
+  WORKER
+}
+
+enum PayType {
+  SALARY_ONLY
+  COMMISSION_ONLY
+  BOTH
+}
+
+enum BookingSource {
+  WALKIN
+  ONLINE
+  PHONE
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentMethod {
+  CASH
+  MPESA
+  CARD
+}
+
+enum PaymentKind {
+  DEPOSIT
+  BALANCE
+  REFUND
+}
+
+enum PayrollStatus {
+  DRAFT
+  APPROVED
+  PAID
+  LOCKED
+}
+
+enum AdjustmentType {
+  ADVANCE
+  DEDUCTION
+  BONUS
+}
+
+enum ConsentPurpose {
+  PHONE
+  ALLERGY
+  PHOTO
+  MARKETING
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  DELIVERED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  DISCOUNT
+  REFUND
+  LOGIN
+  BOOKING_STATUS
+  PAYROLL_APPROVE
+  PAYROLL_PAY
+  CASHUP_APPROVE
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings       BookingSettings?
+  staff          Staff[]
+  clients        Client[]
+  services       Service[]
+  bookings       Booking[]
+  payments       Payment[]
+  cashUps        CashUp[]
+  payrollRuns    PayrollRun[]
+  expenses       Expense[]
+  stockItems     StockItem[]
+  productSales   ProductSale[]
+  timeOffs       TimeOff[]
+  auditLogs      AuditLog[]
+  slotHolds      SlotHold[]
+  clientsPhotos  ClientPhoto[]
+
+  @@index([isActive])
+}
+
+model Client {
+  id            String    @id @default(cuid())
+  branchId      String
+  branch        Branch    @relation(fields: [branchId], references: [id])
+  phone         String    @unique
+  name          String
+  allergies     String?
+  isFirstLash   Boolean   @default(true)
+  isBlocked     Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  bookings      Booking[]
+  photos        ClientPhoto[]
+  consents      ConsentRecord[]
+  feedback      Feedback[]
+  loyaltyPoints LoyaltyPoint[]
+
+  @@index([phone])
+  @@index([branchId])
+}
+
+model ClientPhoto {
+  id         String   @id @default(cuid())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  url        String
+  key        String   @unique
+  caption    String?
+  uploadedBy String?
+  createdAt  DateTime @default(now())
+
+  @@index([clientId])
+  @@index([branchId])
+}
+
+model ConsentRecord {
+  id         String         @id @default(cuid())
+  clientId   String
+  client     Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  purpose    ConsentPurpose
+  granted    Boolean
+  version    String         @default("v1")
+  ipAddress  String?
+  createdAt  DateTime       @default(now())
+  revokedAt  DateTime?
+
+  @@index([clientId, purpose])
+}
+
+model Service {
+  id                String   @id @default(cuid())
+  branchId          String
+  branch            Branch   @relation(fields: [branchId], references: [id])
+  name              String
+  durationMin       Int
+  price             Int
+  requiresPatchTest Boolean  @default(false)
+  isWigService      Boolean  @default(false)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  bookings      Booking[]
+  overrides     ServiceCommissionOverride[]
+  saleItems     SaleItem[]
+
+  @@index([branchId, isActive])
+}
+
+model ServiceCommissionOverride {
+  id        String  @id @default(cuid())
+  staffId   String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  pct       Int
+
+  @@unique([staffId, serviceId])
+}
+
+model Staff {
+  id            String   @id @default(cuid())
+  branchId      String
+  branch        Branch   @relation(fields: [branchId], references: [id])
+  role          Role     @default(WORKER)
+  phone         String   @unique
+  name          String
+  passwordHash  String?
+  isActive      Boolean  @default(true)
+
+  payType       PayType  @default(SALARY_ONLY)
+  monthlySalary Int?
+  commissionPct Int?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  shifts        Shift[]
+  bookings      Booking[]
+  overrides     ServiceCommissionOverride[]
+  payrollLines  PayrollLine[]
+  timeOffs      TimeOff[]
+  auditLogs     AuditLog[]
+  slotHolds     SlotHold[]
+
+  @@index([branchId, role])
+}
+
+model Shift {
+  id        String   @id @default(cuid())
+  staffId   String
+  staff     Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  branchId  String
+  startAt   DateTime
+  endAt     DateTime
+  notes     String?
+  createdAt DateTime @default(now())
+
+  breaks    Break[]
+
+  @@index([staffId, startAt])
+  @@index([branchId, startAt])
+}
+
+model Break {
+  id        String   @id @default(cuid())
+  shiftId   String
+  shift     Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  startAt   DateTime
+  endAt     DateTime
+}
+
+model TimeOff {
+  id        String   @id @default(cuid())
+  staffId   String?
+  staff     Staff?   @relation(fields: [staffId], references: [id])
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  startAt   DateTime
+  endAt     DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([branchId, startAt])
+  @@index([staffId, startAt])
+}
+
+model Booking {
+  id          String        @id @default(cuid())
+  branchId    String
+  branch      Branch        @relation(fields: [branchId], references: [id])
+  clientId    String
+  client      Client        @relation(fields: [clientId], references: [id])
+  staffId     String
+  staff       Staff         @relation(fields: [staffId], references: [id])
+  serviceId   String
+  service     Service       @relation(fields: [serviceId], references: [id])
+  startAt     DateTime
+  endAt       DateTime
+  status      BookingStatus @default(PENDING)
+  source      BookingSource @default(WALKIN)
+  price       Int           @default(0)
+  discount    Int           @default(0)
+  depositPaid Int           @default(0)
+  paid        Boolean       @default(false)
+  manageToken String        @unique
+  allergies   String?
+  notes       String?
+  cancelledAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  payments    Payment[]
+  feedback    Feedback?
+
+  @@index([branchId, startAt])
+  @@index([staffId, startAt])
+  @@index([clientId, startAt])
+  @@index([status])
+}
+
+model SlotHold {
+  id          String   @id @default(cuid())
+  staffId     String
+  staff       Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  branchId    String
+  branch      Branch   @relation(fields: [branchId], references: [id])
+  startAt     DateTime
+  endAt       DateTime
+  clientPhone String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([staffId, expiresAt])
+  @@index([expiresAt])
+}
+
+model BookingSettings {
+  id                String   @id @default(cuid())
+  branchId          String   @unique
+  branch            Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  minNoticeHours    Int      @default(3)
+  maxAheadDays      Int      @default(60)
+  bufferMinutes     Int      @default(15)
+  cancelWindowHours Int      @default(24)
+  depositRequired   Boolean  @default(true)
+  depositAmount     Int      @default(0)
+  maxBookingsPerDay Int      @default(1)
+  updatedAt         DateTime @updatedAt
+}
+
+model Payment {
+  id              String        @id @default(cuid())
+  branchId        String
+  branch          Branch        @relation(fields: [branchId], references: [id])
+  bookingId       String?
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  amount          Int
+  method          PaymentMethod
+  kind            PaymentKind
+  mpesaReceipt    String?       @unique
+  mpesaPhone      String?
+  mpesaCallbackId String?
+  recordedBy      String?
+  notes           String?
+  createdAt       DateTime      @default(now())
+
+  @@index([branchId, createdAt])
+  @@index([bookingId])
+}
+
+model CashUp {
+  id           String    @id @default(cuid())
+  branchId     String
+  branch       Branch    @relation(fields: [branchId], references: [id])
+  businessDate DateTime
+  expectedCash Int
+  countedCash  Int
+  difference   Int
+  approvedBy   String?
+  approvedAt   DateTime?
+  locked       Boolean   @default(false)
+  notes        String?
+  createdAt    DateTime  @default(now())
+
+  @@unique([branchId, businessDate])
+  @@index([branchId, businessDate])
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  branchId  String?
+  branch    Branch?     @relation(fields: [branchId], references: [id])
+  actorId   String?
+  actor     Staff?      @relation(fields: [actorId], references: [id])
+  action    AuditAction
+  entity    String
+  entityId  String
+  before    Json?
+  after     Json?
+  ipAddress String?
+  createdAt DateTime    @default(now())
+
+  @@index([branchId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([entity, entityId])
+}
+
+model PayrollRun {
+  id         String        @id @default(cuid())
+  branchId   String
+  branch     Branch        @relation(fields: [branchId], references: [id])
+  month      DateTime
+  status     PayrollStatus @default(DRAFT)
+  approvedBy String?
+  approvedAt DateTime?
+  paidAt     DateTime?
+  locked     Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+
+  lines      PayrollLine[]
+
+  @@unique([branchId, month])
+  @@index([branchId, month])
+}
+
+model PayrollLine {
+  id           String   @id @default(cuid())
+  payrollRunId String
+  payrollRun   PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  staffId      String
+  staff        Staff    @relation(fields: [staffId], references: [id])
+  salary       Int
+  commission   Int
+  finalAmount  Int
+
+  adjustments  PayrollAdjustment[]
+
+  @@unique([payrollRunId, staffId])
+}
+
+model PayrollAdjustment {
+  id            String         @id @default(cuid())
+  payrollLineId String
+  payrollLine   PayrollLine    @relation(fields: [payrollLineId], references: [id], onDelete: Cascade)
+  type          AdjustmentType
+  amount        Int
+  note          String?
+  createdAt     DateTime       @default(now())
+}
+
+model NotificationTemplate {
+  id        String              @id @default(cuid())
+  key       String              @unique
+  channel   NotificationChannel
+  language  String              @default("en")
+  body      String
+  meta      Json?
+  isActive  Boolean             @default(true)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+}
+
+model NotificationLog {
+  id           String              @id @default(cuid())
+  channel      NotificationChannel
+  templateKey  String
+  recipient    String
+  status       NotificationStatus  @default(QUEUED)
+  providerId   String?
+  errorMessage String?
+  payload      Json?
+  createdAt    DateTime            @default(now())
+  sentAt       DateTime?
+
+  @@index([recipient, createdAt])
+  @@index([templateKey, createdAt])
+}
+
+model OtpCode {
+  id        String              @id @default(cuid())
+  phone     String
+  code      String
+  channel   NotificationChannel @default(SMS)
+  expiresAt DateTime
+  attempts  Int                 @default(0)
+  usedAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model StockItem {
+  id        String   @id @default(cuid())
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  name      String
+  sku       String?
+  quantity  Int      @default(0)
+  reorderAt Int      @default(0)
+  costPrice Int
+  salePrice Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  movements StockMovement[]
+  saleItems SaleItem[]
+
+  @@index([branchId])
+}
+
+model StockMovement {
+  id          String    @id @default(cuid())
+  stockItemId String
+  stockItem   StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+  delta       Int
+  reason      String
+  actorId     String?
+  createdAt   DateTime  @default(now())
+
+  @@index([stockItemId, createdAt])
+}
+
+model ProductSale {
+  id         String        @id @default(cuid())
+  branchId   String
+  branch     Branch        @relation(fields: [branchId], references: [id])
+  clientId   String?
+  total      Int
+  method     PaymentMethod
+  recordedBy String?
+  createdAt  DateTime      @default(now())
+
+  items      SaleItem[]
+
+  @@index([branchId, createdAt])
+}
+
+model SaleItem {
+  id            String      @id @default(cuid())
+  productSaleId String
+  productSale   ProductSale @relation(fields: [productSaleId], references: [id], onDelete: Cascade)
+  stockItemId   String?
+  stockItem     StockItem?  @relation(fields: [stockItemId], references: [id])
+  serviceId     String?
+  service       Service?    @relation(fields: [serviceId], references: [id])
+  name          String
+  quantity      Int
+  unitPrice     Int
+
+  @@index([productSaleId])
+}
+
+model Expense {
+  id         String   @id @default(cuid())
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  category   String
+  amount     Int
+  note       String?
+  recordedBy String?
+  spentAt    DateTime @default(now())
+
+  @@index([branchId, spentAt])
+}
+
+model Feedback {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  bookingId String?  @unique
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+model LoyaltyPoint {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  points    Int
+  reason    String
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+}
