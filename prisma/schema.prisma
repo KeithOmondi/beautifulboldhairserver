@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -206,6 +206,8 @@ model Staff {
   branch        Branch   @relation(fields: [branchId], references: [id])
   role          Role     @default(WORKER)
   phone         String   @unique
+  email              String   @unique
+  mustChangePassword Boolean  @default(false)
   name          String
   passwordHash  String?
   isActive      Boolean  @default(true)
@@ -302,16 +304,19 @@ model Booking {
 }
 
 model SlotHold {
-  id          String   @id @default(cuid())
-  staffId     String
-  staff       Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
-  branchId    String
-  branch      Branch   @relation(fields: [branchId], references: [id])
-  startAt     DateTime
-  endAt       DateTime
-  clientPhone String
-  expiresAt   DateTime
-  createdAt   DateTime @default(now())
+  id              String   @id @default(cuid())
+  staffId         String
+  staff           Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  branchId        String
+  branch          Branch   @relation(fields: [branchId], references: [id])
+  startAt         DateTime
+  endAt           DateTime
+  clientPhone     String
+  clientName      String?  // <--- Add this
+  clientAllergies String?  // <--- Add this
+  mpesaCheckoutId String?  @unique // <--- Add this
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
 
   @@index([staffId, expiresAt])
   @@index([expiresAt])
