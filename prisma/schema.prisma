@@ -106,6 +106,7 @@ model Branch {
   payments       Payment[]
   cashUps        CashUp[]
   payrollRuns    PayrollRun[]
+  pendingPayments PendingPayment[]
   expenses       Expense[]
   stockItems     StockItem[]
   productSales   ProductSale[]
@@ -320,6 +321,22 @@ model SlotHold {
 
   @@index([staffId, expiresAt])
   @@index([expiresAt])
+}
+
+
+model PendingPayment {
+  id           String   @id @default(cuid())
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id]) // <--- Add this line
+  amount       Int
+  mpesaReceipt String   @unique
+  phone        String
+  accountRef   String?
+  isAssigned   Boolean  @default(false)
+  bookingId    String?
+  createdAt    DateTime @default(now())
+
+  @@index([branchId, isAssigned])
 }
 
 model BookingSettings {
