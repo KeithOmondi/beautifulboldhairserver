@@ -1,10 +1,11 @@
+import { dayEnd, dayStart } from "../../utils/time";
 import { prisma } from "../../config/db";
 import { AppError } from "../../utils/errors";
 import type { CreateCashUpDto } from "./cash-up.schema";
 
 export async function createCashUp(branchId: string, data: CreateCashUpDto) {
-  const businessDate = new Date(`${data.businessDate}T00:00:00+03:00`);
-  const dayEnd = new Date(`${data.businessDate}T23:59:59+03:00`);
+  const businessDate = dayStart(data.businessDate);
+  const endOfDay = dayEnd(data.businessDate);
 
   // 1. Check if a cash-up already exists for this date
   const existing = await prisma.cashUp.findFirst({
@@ -17,7 +18,7 @@ export async function createCashUp(branchId: string, data: CreateCashUpDto) {
     where: {
       branchId,
       method: "CASH",
-      createdAt: { gte: businessDate, lte: dayEnd },
+      createdAt: { gte: businessDate, lt: endOfDay },
     },
   });
 

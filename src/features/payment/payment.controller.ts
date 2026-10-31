@@ -7,7 +7,7 @@ import { createPaymentSchema } from "./payment.schema";
  */
 export async function create(req: FastifyRequest, reply: FastifyReply) {
   const data = createPaymentSchema.parse(req.body);
-  const payment = await paymentService.createPayment(req.user.branchId, data);
+  const payment = await paymentService.createPayment(req.user.branchId, data, req.user.sub);
   return reply.status(201).send(payment);
 }
 
@@ -25,6 +25,6 @@ export async function list(req: FastifyRequest, reply: FastifyReply) {
  */
 export async function refund(req: FastifyRequest, reply: FastifyReply) {
   const { id } = req.params as { id: string };
-  const result = await paymentService.refundPayment(req.user.branchId, id);
+  const result = await paymentService.refundPayment(req.user.branchId, id, req.user.sub);
   return reply.send(result);
 }

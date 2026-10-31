@@ -1,70 +1,43 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import * as publicBookingService from "./public-booking.service";
-import { 
-  requestOtpSchema, 
-  verifyOtpSchema, 
-  holdSlotSchema, 
-  confirmPublicBookingSchema 
-} from "./public-booking.schema";
-import { AppError } from "../../utils/errors";
-import { prisma } from "../../config/db";
+import * as service from "./public-booking.service";
+import { createPublicBookingSchema, publicAvailabilitySchema, publicRescheduleSchema } from "./public-booking.schema";
 
-/**
- * POST /api/v1/public/request-otp
- */
-export async function requestOtp(req: FastifyRequest, reply: FastifyReply) {
-  const { phone } = requestOtpSchema.parse(req.body);
-  const result = await publicBookingService.requestClientOtp(phone);
-  return reply.send(result);
+const param = (req: FastifyRequest, key: string) => (req.params as Record<string, string>)[key]!;
+
+export const info = async (_req: FastifyRequest, reply: FastifyReply) => reply.send(await service.getPublicInfo());
+export const services = async (_req: FastifyRequest, reply: FastifyReply) => reply.send(await service.getPublicServices());
+export const staff = async (req: FastifyRequest, reply: FastifyReply) =>
+  reply.send(await service.getPublicStaff((req.query as { serviceId?: string }).serviceId));
+
+export async function availability(req: FastifyRequest, reply: FastifyReply) {
+  return reply.send(await service.getPublicAvailability(publicAvailabilitySchema.parse(req.query)));
 }
 
-/**
- * POST /api/v1/public/verify-otp
- */
-export async function verifyOtp(req: FastifyRequest, reply: FastifyReply) {
-  const data = verifyOtpSchema.parse(req.body);
-  const result = await publicBookingService.verifyClientOtp(req.server, data);
-  return reply.send(result);
+export async function createBooking(req: FastifyRequest, reply: FastifyReply) {
+  const input = createPublicBookingSchema.parse(req.body);
+  return reply.status(201).send(await service.createPublicBooking(input));
 }
 
-/**
- * POST /api/v1/public/hold-slot
- * Requires: Client JWT (Authorization: Bearer <token>)
- */
-export async function holdSlot(req: FastifyRequest, reply: FastifyReply) {
-  const data = holdSlotSchema.parse(req.body);
-  
-  // FIX: Use `as unknown as` to bypass the staff AuthUser type inference
-  const user = req.user as unknown as { type: string; phone: string; clientId: string | null };
-  
-  if (!user || user.type !== "client") {
-    throw new AppError(401, "Unauthorized: Client token required", "UNAUTHORIZED");
-  }
-
-  const branch = await prisma.branch.findFirst({ where: { isActive: true } });
-  if (!branch) throw new AppError(500, "Salon is not currently accepting bookings", "NO_BRANCH");
-
-  const result = await publicBookingService.holdSlot(branch.id, user.phone, data);
-  return reply.status(201).send(result);
+export async function holdStatus(req: FastifyRequest, reply: FastifyReply) {
+  return reply.send(await service.getHoldStatus(param(req, "id")));
 }
 
-/**
- * POST /api/v1/public/confirm
- * Requires: Client JWT (Authorization: Bearer <token>)
- */
-export async function confirmBooking(req: FastifyRequest, reply: FastifyReply) {
-  const data = confirmPublicBookingSchema.parse(req.body);
-  
-  // FIX: Use `as unknown as` here as well
-  const user = req.user as unknown as { type: string; phone: string; clientId: string | null };
-  
-  if (!user || user.type !== "client") {
-    throw new AppError(401, "Unauthorized: Client token required", "UNAUTHORIZED");
-  }
+export async function getManaged(req: FastifyRequest, reply: FastifyReply) {
+  return reply.send(await service.getManagedBooking(param(req, "token")));
+}
 
-  const branch = await prisma.branch.findFirst({ where: { isActive: true } });
-  if (!branch) throw new AppError(500, "Salon is not currently accepting bookings", "NO_BRANCH");
+export async function cancelManaged(req: FastifyRequest, reply: FastifyReply) {
+  return reply.send(await service.cancelManagedBooking(param(req, "token")));
+}
 
-  const result = await publicBookingService.confirmPublicBooking(branch.id, user.phone, data);
-  return reply.status(201).send(result);
+export async function rescheduleManaged(req: FastifyRequest, reply: FastifyReply) {
+  const { newStartAt } = publicRescheduleSchema.parse(req.body);
+  return reply.send(await service.rescheduleManagedBooking(param(req, "token"), newStartAt));
+}
+
+/** The branches a customer can book at, and the one they are currently looking at. */
+export async function branches(_req: FastifyRequest, reply: FastifyReply) {
+  const [list, current] = await Promise.all([service.listPublicBranches(), service.getPublicBranch()]);
+  reply.header("Cache-Control", "no-store");
+  return reply.send({ current: current.slug, branches: list });
 }

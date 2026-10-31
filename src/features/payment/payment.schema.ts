@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { PaymentMethod, PaymentKind } from "../../generated/prisma/client";
 
-const paymentMethodEnum = z.nativeEnum(PaymentMethod);
+// Card is not accepted until the card terminal is integrated (old card records stay readable).
+const paymentMethodEnum = z.nativeEnum(PaymentMethod).refine((m) => m !== "CARD", "Card payments are not available yet. Use cash or M-Pesa.");
 const paymentKindEnum = z.nativeEnum(PaymentKind);
 
 export const createPaymentSchema = z.object({

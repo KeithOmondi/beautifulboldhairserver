@@ -1,116 +1,136 @@
+import { commissionFor, effectiveRate } from "../../engines/payroll/commission";
 import { prisma } from "../../config/db";
+import { addDays, dayEnd, dayStart, monthBounds, nairobiDateString, todayString } from "../../utils/time";
 
-export async function getDashboard(branchId: string) {
-  const now = new Date();
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(now);
-  dayEnd.setHours(23, 59, 59, 999);
+const TREND_DAYS = 14;
 
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+export async function getDashboard(branchId: string, month?: string) {
+  const today = todayString();
+  const anchor = month ? `${month}-01` : today;
+  const { first, last } = monthBounds(anchor);
 
-  // ─── Today's bookings ───
-  const todayBookings = await prisma.booking.findMany({
-    where: { branchId, startAt: { gte: dayStart, lte: dayEnd } },
-  });
+  const trendFrom = addDays(today, -(TREND_DAYS - 1));
 
-  const completedCount = todayBookings.filter((b) => b.status === "COMPLETED").length;
-  const pendingCount = todayBookings.filter(
-    (b) => b.status === "CONFIRMED" || b.status === "PENDING"
-  ).length;
-  const cancelledCount = todayBookings.filter((b) => b.status === "CANCELLED").length;
+  const [todayBookings, monthBookings, trendPayments, monthPayments, monthExpenses, refundsDue, unassigned, lowStock, openCashUps, openComplaints] =
+    await Promise.all([
+      prisma.booking.findMany({
+        where: { branchId, startAt: { gte: dayStart(today), lt: dayEnd(today) } },
+        include: { client: { select: { name: true } }, service: { select: { name: true } }, staff: { select: { id: true, name: true } } },
+        orderBy: { startAt: "asc" },
+      }),
+      prisma.booking.findMany({
+        where: { branchId, startAt: { gte: dayStart(first), lt: dayEnd(last) } },
+        select: { staffId: true, serviceId: true, status: true, paid: true, price: true, discount: true, service: { select: { name: true } }, staff: { select: { name: true, payType: true, commissionPct: true } } },
+      }),
+      prisma.payment.findMany({
+        where: { branchId, createdAt: { gte: dayStart(trendFrom), lt: dayEnd(today) } },
+        select: { amount: true, createdAt: true },
+      }),
+      prisma.payment.findMany({
+        where: { branchId, createdAt: { gte: dayStart(first), lt: dayEnd(last) } },
+        select: { amount: true, method: true },
+      }),
+      prisma.expense.aggregate({ where: { branchId, spentAt: { gte: dayStart(first), lt: dayEnd(last) } }, _sum: { amount: true } }),
+      prisma.booking.count({ where: { branchId, depositRefundDue: true } }),
+      prisma.pendingPayment.count({ where: { branchId, isAssigned: false } }),
+      prisma.stockItem.findMany({ where: { branchId }, select: { quantity: true, reorderAt: true } }),
+      prisma.cashUp.count({ where: { branchId, locked: false } }),
+      prisma.complaint.count({ where: { branchId, status: { not: "RESOLVED" } } }),
+    ]);
 
-  // ─── Today's revenue (paid only) ───
-  const todayPayments = await prisma.payment.findMany({
-    where: { branchId, createdAt: { gte: dayStart, lte: dayEnd } },
-  });
+  // ── Today ──
+  const statusCount = (s: string) => todayBookings.filter((b) => b.status === s).length;
+  const todayPayments = trendPayments.filter((p) => nairobiDateString(p.createdAt) === today);
   const todayRevenue = todayPayments.reduce((sum, p) => sum + p.amount, 0);
 
-  // ─── Month revenue ───
-  const monthPayments = await prisma.payment.findMany({
-    where: { branchId, createdAt: { gte: monthStart, lte: monthEnd } },
-  });
+  // ── 14-day revenue trend ──
+  const byDay = new Map<string, number>();
+  for (let i = 0; i < TREND_DAYS; i++) byDay.set(addDays(trendFrom, i), 0);
+  for (const p of trendPayments) {
+    const key = nairobiDateString(p.createdAt);
+    if (byDay.has(key)) byDay.set(key, byDay.get(key)! + p.amount);
+  }
+  const trend = [...byDay.entries()].map(([date, revenue]) => ({ date, revenue }));
+
+  // ── Month ──
   const monthRevenue = monthPayments.reduce((sum, p) => sum + p.amount, 0);
+  const expenses = monthExpenses._sum.amount ?? 0;
+  const byMethod = { CASH: 0, MPESA: 0, CARD: 0 } as Record<string, number>;
+  for (const p of monthPayments) byMethod[p.method] = (byMethod[p.method] ?? 0) + p.amount;
 
-  // ─── Month bookings ───
-  const monthBookings = await prisma.booking.findMany({
-    where: { branchId, startAt: { gte: monthStart, lte: monthEnd } },
-    include: { service: true, staff: true },
-  });
+  const overrides = await prisma.serviceCommissionOverride.findMany({ where: { staff: { branchId } } });
+  const overrideMap = new Map(overrides.map((o) => [`${o.staffId}:${o.serviceId}`, o.pct]));
 
-  // ─── Commission owed this month ───
   let commissionOwed = 0;
-  for (const booking of monthBookings) {
-    if (booking.status !== "COMPLETED" || !booking.paid) continue;
-    if (booking.staff.payType === "SALARY_ONLY") continue;
-    const override = await prisma.serviceCommissionOverride.findUnique({
-      where: { staffId_serviceId: { staffId: booking.staffId, serviceId: booking.serviceId } },
-    });
-    const pct = override ? override.pct : booking.staff.commissionPct || 0;
-    const netPrice = booking.price - booking.discount;
-    commissionOwed += Math.floor((netPrice * pct) / 10000);
+  const services = new Map<string, { name: string; count: number; revenue: number }>();
+  const staff = new Map<string, { name: string; count: number; revenue: number }>();
+
+  for (const b of monthBookings) {
+    if (b.status === "CANCELLED" || b.status === "NO_SHOW") continue;
+    const net = b.price - b.discount;
+
+    const s = services.get(b.serviceId) ?? { name: b.service.name, count: 0, revenue: 0 };
+    s.count += 1;
+    s.revenue += net;
+    services.set(b.serviceId, s);
+
+    const st = staff.get(b.staffId) ?? { name: b.staff.name, count: 0, revenue: 0 };
+    st.count += 1;
+    st.revenue += net;
+    staff.set(b.staffId, st);
+
+    if (b.status === "COMPLETED" && b.paid && b.staff.payType !== "SALARY_ONLY") {
+      const pct = effectiveRate(b.staff.commissionPct, overrideMap.get(`${b.staffId}:${b.serviceId}`));
+      commissionOwed += commissionFor(b.price, b.discount, pct);
+    }
   }
 
-  // ─── Staff on duty now ───
-  const activeShifts = await prisma.shift.findMany({
-    where: { branchId, startAt: { lte: now }, endAt: { gte: now } },
-    include: { staff: true },
-  });
-  const staffOnDuty = activeShifts.map((s) => ({
-    id: s.staff.id,
-    name: s.staff.name,
-    role: s.staff.role,
-    shiftEndsAt: s.endAt,
-  }));
+  const top = (m: Map<string, { name: string; count: number; revenue: number }>) =>
+    [...m.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 5);
 
-  // ─── Top services this month ───
-  const serviceMap = new Map<string, { name: string; count: number; revenue: number }>();
-  for (const booking of monthBookings) {
-    if (booking.status === "CANCELLED" || booking.status === "NO_SHOW") continue;
-    const key = booking.serviceId;
-    const existing = serviceMap.get(key) ?? {
-      name: booking.service.name,
-      count: 0,
-      revenue: 0,
-    };
-    existing.count += 1;
-    existing.revenue += booking.price - booking.discount;
-    serviceMap.set(key, existing);
-  }
-  const topServices = Array.from(serviceMap.values())
-    .sort((a, b) => b.revenue - a.revenue)
-    .slice(0, 5);
-
-  // ─── Cash-up status ───
-  const pendingCashUps = await prisma.cashUp.count({
-    where: { branchId, locked: false },
-  });
-
-  const lastCashUp = await prisma.cashUp.findFirst({
-    where: { branchId },
-    orderBy: { businessDate: "desc" },
-  });
+  const now = new Date();
+  const agenda = todayBookings
+    .filter((b) => b.status === "CONFIRMED" || b.status === "PENDING")
+    .slice(0, 8)
+    .map((b) => ({
+      id: b.id,
+      startAt: b.startAt,
+      status: b.status,
+      clientName: b.client.name,
+      serviceName: b.service.name,
+      staffName: b.staff.name,
+      isPast: b.endAt < now,
+    }));
 
   return {
+    asOf: now,
+    month: anchor.slice(0, 7),
     today: {
       revenue: todayRevenue,
       bookingCount: todayBookings.length,
-      completedCount,
-      pendingCount,
-      cancelledCount,
+      upcomingCount: todayBookings.filter((b) => b.status === "CONFIRMED" || b.status === "PENDING").length,
+      completedCount: statusCount("COMPLETED"),
+      cancelledCount: statusCount("CANCELLED"),
+      noShowCount: statusCount("NO_SHOW"),
     },
-    month: {
+    agenda,
+    trend,
+    monthSummary: {
       revenue: monthRevenue,
-      bookingCount: monthBookings.length,
+      expenses,
+      profit: monthRevenue - expenses,
+      bookingCount: monthBookings.filter((b) => b.status !== "CANCELLED").length,
       commissionOwed,
+      byMethod,
     },
-    staffOnDuty,
-    topServices,
-    pendingCashUps,
-    lastCashUp: {
-      date: lastCashUp?.businessDate ?? null,
-      difference: lastCashUp?.difference ?? 0,
+    topServices: top(services),
+    topStaff: top(staff),
+    alerts: {
+      refundsDue,
+      unassignedPayments: unassigned,
+      lowStock: lowStock.filter((i) => i.quantity <= i.reorderAt).length,
+      openCashUps,
+      openComplaints,
     },
   };
 }

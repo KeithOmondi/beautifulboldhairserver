@@ -17,10 +17,30 @@ export async function listClients(branchId: string, searchQuery?: string) {
     ];
   }
 
-  return prisma.client.findMany({
+  const clients = await prisma.client.findMany({
     where: whereClause,
     orderBy: { createdAt: "desc" },
-    // We don't include bookings here to keep the list fast
+    take: 300,
+  });
+
+  // Visit stats in one grouped query rather than per-client lookups.
+  const stats = await prisma.booking.groupBy({
+    by: ["clientId"],
+    where: { clientId: { in: clients.map((c) => c.id) }, status: "COMPLETED" },
+    _count: { _all: true },
+    _max: { startAt: true },
+    _sum: { price: true, discount: true },
+  });
+  const byClient = new Map(stats.map((s) => [s.clientId, s]));
+
+  return clients.map((c) => {
+    const s = byClient.get(c.id);
+    return {
+      ...c,
+      visits: s?._count._all ?? 0,
+      lastVisit: s?._max.startAt ?? null,
+      totalSpent: (s?._sum.price ?? 0) - (s?._sum.discount ?? 0),
+    };
   });
 }
 
@@ -102,7 +122,7 @@ export async function updateClient(branchId: string, clientId: string, data: Upd
 
     // Check if the new phone number is already taken by another client
     const existing = await prisma.client.findFirst({
-      where: { phone, id: { not: clientId } },
+      where: { branchId, phone, id: { not: clientId } },
     });
 
     if (existing) {

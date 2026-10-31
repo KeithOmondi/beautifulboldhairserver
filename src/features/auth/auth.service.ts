@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { prisma } from "../../config/db";
 import { AppError } from "../../utils/errors";
 import { verifyPassword, hashPassword } from "../../utils/password";
@@ -37,6 +38,7 @@ export async function getStaffProfile(id: string) {
       phone: true, 
       role: true, 
       branchId: true, 
+      canSwitchBranches: true,
       isActive: true,
       mustChangePassword: true 
     },
@@ -76,7 +78,7 @@ export async function requestPasswordReset(emailInput: string) {
   // Security: Do not throw an error if email doesn't exist.
   if (!staff) return { message: "If that email exists, an OTP has been sent." };
 
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const code = randomInt(100000, 1000000).toString();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
   await prisma.otpCode.create({
@@ -113,8 +115,12 @@ export async function resetPassword(data: ResetPasswordInput) {
     orderBy: { createdAt: "desc" },
   });
 
-  if (!otpRecord || otpRecord.code !== data.otp) {
-    throw new AppError(400, "Invalid or expired OTP", "INVALID_OTP");
+  if (!otpRecord || otpRecord.attempts >= 5) {
+    throw new AppError(400, "Invalid or expired code. Request a new one.", "INVALID_OTP");
+  }
+  if (otpRecord.code !== data.otp) {
+    await prisma.otpCode.update({ where: { id: otpRecord.id }, data: { attempts: { increment: 1 } } });
+    throw new AppError(400, "Invalid or expired code. Request a new one.", "INVALID_OTP");
   }
 
   const newHash = await hashPassword(data.newPassword);

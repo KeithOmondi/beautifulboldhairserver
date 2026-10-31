@@ -1,5 +1,6 @@
 import { prisma } from "../../config/db";
 import { AppError } from "../../utils/errors";
+import { normalizeCategory } from "../../utils/service-category";
 import type { 
   CreateServiceDto, 
   UpdateServiceDto, 
@@ -32,6 +33,8 @@ export async function createService(branchId: string, data: CreateServiceDto) {
     throw new AppError(409, "A service with this name already exists", "DUPLICATE_SERVICE");
   }
 
+  if (data.salePrice != null && data.salePrice >= data.price) throw new AppError(400, "The offer price must be lower than the normal price", "BAD_REQUEST");
+
   return prisma.service.create({
     data: {
       branchId,
@@ -41,6 +44,10 @@ export async function createService(branchId: string, data: CreateServiceDto) {
       requiresPatchTest: data.requiresPatchTest,
       isWigService: data.isWigService,
       isActive: data.isActive,
+      description: data.description ?? null,
+      salePrice: data.salePrice ?? null,
+      category: normalizeCategory(data.category),
+      imageUrl: data.imageUrl ?? null,
     },
   });
 }
@@ -76,6 +83,14 @@ export async function updateService(branchId: string, serviceId: string, data: U
   if (data.requiresPatchTest !== undefined) updateData.requiresPatchTest = data.requiresPatchTest;
   if (data.isWigService !== undefined) updateData.isWigService = data.isWigService;
   if (data.isActive !== undefined) updateData.isActive = data.isActive;
+  if (data.description !== undefined) updateData.description = data.description;
+  if (data.salePrice !== undefined) updateData.salePrice = data.salePrice;
+  if (data.category !== undefined) updateData.category = normalizeCategory(data.category);
+  if (data.imageUrl !== undefined) updateData.imageUrl = data.imageUrl;
+
+  const nextPrice = data.price ?? service.price;
+  const nextSale = data.salePrice !== undefined ? data.salePrice : service.salePrice;
+  if (nextSale != null && nextSale >= nextPrice) throw new AppError(400, "The offer price must be lower than the normal price", "BAD_REQUEST");
 
   return prisma.service.update({
     where: { id: serviceId },

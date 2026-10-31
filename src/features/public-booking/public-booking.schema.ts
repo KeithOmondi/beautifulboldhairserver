@@ -1,61 +1,27 @@
 import { z } from "zod";
 
-/**
- * Validates the phone number for an OTP request.
- * We use a basic regex here to ensure it's a valid Kenyan number format,
- * preventing garbage data from hitting the SMS/Email provider.
- */
-export const requestOtpSchema = z.object({
-  phone: z
-    .string()
-    .regex(
-      /^(?:\+?254|0)([17]\d{8})$/,
-      "Invalid Kenyan phone number (e.g., 0712345678)"
-    ),
+const phone = z.string().regex(/^(?:\+?254|0)([17]\d{8})$/, "Enter a valid Kenyan phone number (e.g. 0712345678)");
+const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD");
+
+export const publicAvailabilitySchema = z.object({
+  serviceId: z.string().cuid(),
+  date,
+  /** Omit (or "any") to search across all stylists. */
+  staffId: z.string().optional(),
 });
 
-/**
- * Validates the OTP verification request.
- */
-export const verifyOtpSchema = z.object({
-  phone: z
-    .string()
-    .regex(
-      /^(?:\+?254|0)([17]\d{8})$/,
-      "Invalid Kenyan phone number"
-    ),
-  code: z.string().length(6, "OTP must be exactly 6 digits"),
+export const createPublicBookingSchema = z.object({
+  serviceId: z.string().cuid("Invalid service"),
+  staffId: z.string().optional(), // omit / "any" = first free stylist
+  startAt: z.string().datetime({ offset: true, message: "Invalid start time" }),
+  name: z.string().trim().min(2, "Please enter your name").max(80),
+  phone,
+  allergies: z.string().trim().max(300).optional(),
 });
 
-/**
- * Validates the request to hold a slot.
- * Requires the client to select a staff, service, and time.
- * Also captures their name and allergies BEFORE they pay via M-Pesa.
- */
-export const holdSlotSchema = z.object({
-  staffId: z.string().cuid("Invalid staff ID"),
-  serviceId: z.string().cuid("Invalid service ID"),
-  startAt: z.string().datetime({ 
-    offset: true, 
-    message: "Start time must be a valid ISO 8601 string with timezone offset" 
-  }),
-  name: z.string().min(2, "Name must be at least 2 characters").trim(),
-  allergies: z.string().optional(),
+export const publicRescheduleSchema = z.object({
+  newStartAt: z.string().datetime({ offset: true }),
 });
 
-/**
- * Validates the final booking confirmation.
- * The holdId proves they hold the slot, and we collect their details.
- */
-export const confirmPublicBookingSchema = z.object({
-  holdId: z.string().cuid("Invalid hold ID"),
-  name: z.string().min(2, "Name must be at least 2 characters").trim(),
-  allergies: z.string().optional(),
-  isFirstLash: z.boolean().default(false),
-});
-
-// Export the inferred types for the controllers
-export type RequestOtpDto = z.infer<typeof requestOtpSchema>;
-export type VerifyOtpDto = z.infer<typeof verifyOtpSchema>;
-export type HoldSlotDto = z.infer<typeof holdSlotSchema>;
-export type ConfirmPublicBookingDto = z.infer<typeof confirmPublicBookingSchema>;
+export type PublicAvailabilityQuery = z.infer<typeof publicAvailabilitySchema>;
+export type CreatePublicBookingInput = z.infer<typeof createPublicBookingSchema>;

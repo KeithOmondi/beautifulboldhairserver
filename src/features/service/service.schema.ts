@@ -7,6 +7,10 @@ export const createServiceSchema = z.object({
   requiresPatchTest: z.boolean().default(false),
   isWigService: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  description: z.string().trim().max(300).optional(),
+  salePrice: z.number().int().nonnegative().nullable().optional(),
+  category: z.string().trim().max(40).nullable().optional(),
+  imageUrl: z.string().url().max(500).startsWith("https://res.cloudinary.com/").nullable().optional(),
 });
 
 export const updateServiceSchema = z.object({
@@ -16,6 +20,10 @@ export const updateServiceSchema = z.object({
   requiresPatchTest: z.boolean().optional(),
   isWigService: z.boolean().optional(),
   isActive: z.boolean().optional(),
+  description: z.string().trim().max(300).nullable().optional(),
+  salePrice: z.number().int().nonnegative().nullable().optional(),
+  category: z.string().trim().max(40).nullable().optional(),
+  imageUrl: z.string().url().max(500).startsWith("https://res.cloudinary.com/").nullable().optional(),
 });
 
 export const createCommissionOverrideSchema = z.object({

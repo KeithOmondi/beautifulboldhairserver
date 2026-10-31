@@ -56,3 +56,7 @@ export function applyDiscount(price: number, discountAmount: number): number {
   const finalPrice = price - discountAmount;
   return Math.max(0, finalPrice); // Never return a negative price
 }
+/** What a client pays today: the offer price when one is set and genuinely lower, otherwise the normal price. */
+export function currentPrice(s: { price: number; salePrice?: number | null }): number {
+  return s.salePrice != null && s.salePrice >= 0 && s.salePrice < s.price ? s.salePrice : s.price;
+}

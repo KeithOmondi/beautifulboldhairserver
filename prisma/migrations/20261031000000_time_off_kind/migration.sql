@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "TimeOff" ADD COLUMN "kind" TEXT NOT NULL DEFAULT 'OFF_DAY';

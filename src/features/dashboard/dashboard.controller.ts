@@ -8,8 +8,8 @@ import { getDashboardQuerySchema } from "./dashboard.schema";
 export async function get(req: FastifyRequest, reply: FastifyReply) {
   // Optional: If we want to support historical queries later, 
   // we validate the query string here.
-  getDashboardQuerySchema.parse(req.query);
+  const { month } = getDashboardQuerySchema.parse(req.query);
 
-  const summary = await dashboardService.getDashboard(req.user.branchId);
+  const summary = await dashboardService.getDashboard(req.user.branchId, month);
   return reply.send(summary);
 }

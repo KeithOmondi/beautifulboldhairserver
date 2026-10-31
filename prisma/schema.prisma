@@ -94,6 +94,21 @@ enum AuditAction {
 model Branch {
   id        String   @id @default(cuid())
   name      String
+  /// The town or area this branch serves (e.g. "Kisumu"), shown big in the branch picker.
+  city      String?
+  /// Short web-safe name used in links and the branch picker (e.g. "kisumu").
+  slug      String   @unique @default(cuid())
+  /// Order in the branch picker; the first active branch is the default one customers land on.
+  sortOrder Int      @default(0)
+  phone     String?
+  address   String?
+  tagline   String?
+  about     String?
+  instagram String?
+  whatsapp  String?
+  hoursText String?
+  /// A short promo line shown in a bar at the top of the website (e.g. an offer). Empty means no bar.
+  announcement String?
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -114,6 +129,10 @@ model Branch {
   auditLogs      AuditLog[]
   slotHolds      SlotHold[]
   clientsPhotos  ClientPhoto[]
+  galleryImages  GalleryImage[]
+  complaints     Complaint[]
+  shopOrders     ShopOrder[]
+  heroSlides     HeroSlide[]
 
   @@index([isActive])
 }
@@ -122,7 +141,7 @@ model Client {
   id            String    @id @default(cuid())
   branchId      String
   branch        Branch    @relation(fields: [branchId], references: [id])
-  phone         String    @unique
+  phone         String
   name          String
   allergies     String?
   isFirstLash   Boolean   @default(true)
@@ -134,8 +153,10 @@ model Client {
   photos        ClientPhoto[]
   consents      ConsentRecord[]
   feedback      Feedback[]
+  complaints    Complaint[]
   loyaltyPoints LoyaltyPoint[]
 
+  @@unique([branchId, phone])
   @@index([phone])
   @@index([branchId])
 }
@@ -180,12 +201,20 @@ model Service {
   requiresPatchTest Boolean  @default(false)
   isWigService      Boolean  @default(false)
   isActive          Boolean  @default(true)
+  description       String?
+  /// A discounted price shown crossed-out next to the normal one. Must be below price; null means no offer.
+  salePrice         Int?
+  /// Groups services on the website (e.g. "Wigs", "Lashes").
+  category          String?
+  /// A photo for the service card, chosen from the gallery.
+  imageUrl          String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   bookings      Booking[]
   overrides     ServiceCommissionOverride[]
   saleItems     SaleItem[]
+  performedBy   StaffService[]
 
   @@index([branchId, isActive])
 }
@@ -206,12 +235,18 @@ model Staff {
   branchId      String
   branch        Branch   @relation(fields: [branchId], references: [id])
   role          Role     @default(WORKER)
+  /// May switch to other branches (e.g. an owner or a manager overseeing both). Everyone else is locked to their own branch.
+  canSwitchBranches Boolean @default(false)
   phone         String   @unique
   email              String   @unique
   mustChangePassword Boolean  @default(false)
   name          String
   passwordHash  String?
   isActive      Boolean  @default(true)
+  isBookable    Boolean  @default(true)
+  title         String?
+  // Default weekly schedule keyed by day of week (0 = Sunday): { "1": { "start": "09:00", "end": "18:00" }, "0": null }
+  weeklyHours   Json?
 
   payType       PayType  @default(SALARY_ONLY)
   monthlySalary Int?
@@ -222,6 +257,7 @@ model Staff {
 
   shifts        Shift[]
   bookings      Booking[]
+  services      StaffService[]
   overrides     ServiceCommissionOverride[]
   payrollLines  PayrollLine[]
   timeOffs      TimeOff[]
@@ -264,6 +300,8 @@ model TimeOff {
   startAt   DateTime
   endAt     DateTime
   reason    String?
+  /// LEAVE | OFF_DAY | EMERGENCY | SICK | HOLIDAY
+  kind      String   @default("OFF_DAY")
   createdAt DateTime @default(now())
 
   @@index([branchId, startAt])
@@ -289,6 +327,10 @@ model Booking {
   depositPaid Int           @default(0)
   paid        Boolean       @default(false)
   manageToken String        @unique
+  depositRefundDue Boolean  @default(false)
+  reminderSentAt   DateTime?
+  reviewRequestedAt DateTime?
+  complaints       Complaint[]
   allergies   String?
   notes       String?
   cancelledAt DateTime?
@@ -297,11 +339,29 @@ model Booking {
 
   payments    Payment[]
   feedback    Feedback?
+  paymentRequests PaymentRequest[]
 
   @@index([branchId, startAt])
   @@index([staffId, startAt])
   @@index([clientId, startAt])
   @@index([status])
+}
+
+/// An M-Pesa prompt the front desk sent to a client to clear what they still owe on a booking.
+model PaymentRequest {
+  id              String   @id @default(cuid())
+  branchId        String
+  bookingId       String
+  booking         Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amount          Int
+  phone           String
+  status          String   @default("PENDING") // PENDING | PAID | FAILED | EXPIRED | CONFLICT
+  mpesaCheckoutId String?  @unique
+  failureReason   String?
+  requestedBy     String?
+  createdAt       DateTime @default(now())
+
+  @@index([bookingId, createdAt])
 }
 
 model SlotHold {
@@ -313,9 +373,14 @@ model SlotHold {
   startAt         DateTime
   endAt           DateTime
   clientPhone     String
-  clientName      String?  // <--- Add this
-  clientAllergies String?  // <--- Add this
-  mpesaCheckoutId String?  @unique // <--- Add this
+  clientName      String?
+  clientAllergies String?
+  serviceId       String?
+  depositAmount   Int      @default(0)
+  status          String   @default("PENDING") // PENDING | PAID | FAILED | EXPIRED | CONFLICT
+  bookingId       String?
+  failureReason   String?
+  mpesaCheckoutId String?  @unique
   expiresAt       DateTime
   createdAt       DateTime @default(now())
 
@@ -350,6 +415,18 @@ model BookingSettings {
   depositRequired   Boolean  @default(true)
   depositAmount     Int      @default(0)
   maxBookingsPerDay Int      @default(1)
+  showStylists      Boolean  @default(false)
+  /// Online shop: delivery charge within Nairobi, free above this basket value (null = never free), and whether pay-on-delivery is allowed.
+  shopDeliveryFee   Int      @default(0)
+  shopFreeOver      Int?
+  shopCodAllowed    Boolean  @default(true)
+  /// What managers of this branch may do beyond running the day. Set by the owner.
+  mgrReports        Boolean  @default(true)
+  mgrRefunds        Boolean  @default(false)
+  mgrCashUp         Boolean  @default(true)
+  mgrStaffPay       Boolean  @default(false)
+  /// Salon opening days and hours: {"0".."6": {start,end} | null}. Null means no salon-level limit.
+  openingHours      Json?
   updatedAt         DateTime @updatedAt
 }
 
@@ -367,9 +444,14 @@ model Payment {
   mpesaCallbackId String?
   recordedBy      String?
   notes           String?
+  shopOrderId     String?
+  shopOrder       ShopOrder?    @relation(fields: [shopOrderId], references: [id])
+  /// When the money was actually paid (M-Pesa's own transaction time when we have it); createdAt is when we wrote the row.
+  paidAt          DateTime      @default(now())
   createdAt       DateTime      @default(now())
 
   @@index([branchId, createdAt])
+  @@index([branchId, paidAt])
   @@index([bookingId])
 }
 
@@ -503,12 +585,25 @@ model StockItem {
   quantity  Int      @default(0)
   reorderAt Int      @default(0)
   costPrice Int
+  /// What a customer pays today.
   salePrice Int
+  /// The normal price, shown crossed out while salePrice is lower (an offer). Null means no offer.
+  compareAtPrice Int?
+  description String?
+  /// Groups products in the shop (e.g. "Bob wigs", "Wig tools").
+  category    String?
+  /// Photo URLs, first is the cover.
+  images      String[] @default([])
+  /// Visible in the online shop. Off keeps it in inventory only.
+  isPublished Boolean  @default(false)
+  isFeatured  Boolean  @default(false)
+  isArchived  Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   movements StockMovement[]
   saleItems SaleItem[]
+  orderItems ShopOrderItem[]
 
   @@index([branchId])
 }
@@ -523,6 +618,89 @@ model StockMovement {
   createdAt   DateTime  @default(now())
 
   @@index([stockItemId, createdAt])
+}
+
+/// An online shop order: wigs and hair products bought from the website.
+/// A banner in the big sliding area at the top of a branch's home page, changed by the owner from time to time.
+model HeroSlide {
+  id           String   @id @default(cuid())
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  /// DESIGNED = a finished banner image with its own writing; PHOTO_TEXT = a photo with our headline and button on top.
+  kind         String   @default("PHOTO_TEXT")
+  imageUrl     String
+  /// Optional taller version shown on phones.
+  mobileImageUrl String?
+  eyebrow      String?
+  headline     String?
+  subtext      String?
+  buttonLabel  String?
+  /// Where the banner (or its button) goes: a page on this site (/book, /shop?sale=1), an on-page section (#services) or an https link.
+  linkTo       String?
+  align        String   @default("left") // left | center
+  /// How dark the shade over a photo is, 0 to 80, so the writing stays readable.
+  overlay      Int      @default(45)
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([branchId, sortOrder])
+}
+
+model ShopOrder {
+  id              String   @id @default(cuid())
+  /// Friendly number shown to customers: WO-(1000 + orderNo).
+  orderNo         Int      @unique @default(autoincrement())
+  branchId        String
+  branch          Branch   @relation(fields: [branchId], references: [id])
+  clientId        String?
+  /// Customer-facing secret link for tracking the order.
+  token           String   @unique
+  name            String
+  phone           String
+  email           String?
+  fulfilment      String   // DELIVERY | PICKUP
+  address         String?
+  area            String?
+  notes           String?
+  subtotal        Int
+  deliveryFee     Int      @default(0)
+  total           Int
+  status          String   @default("PENDING_PAYMENT") // PENDING_PAYMENT | CONFIRMED | READY | COMPLETED | CANCELLED
+  payMethod       String   // MPESA | ON_DELIVERY
+  paymentStatus   String   @default("UNPAID") // UNPAID | PAID | FAILED
+  mpesaCheckoutId String?  @unique
+  failureReason   String?
+  paidAt          DateTime?
+  /// Stock is held until then for an unpaid M-Pesa order.
+  expiresAt       DateTime?
+  cancelReason    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  items           ShopOrderItem[]
+  payments        Payment[]
+
+  @@index([branchId, status, createdAt])
+  @@index([phone])
+}
+
+model ShopOrderItem {
+  id          String    @id @default(cuid())
+  orderId     String
+  order       ShopOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  stockItemId String?
+  stockItem   StockItem? @relation(fields: [stockItemId], references: [id])
+  /// Snapshots, so the order stays correct if the product is edited later.
+  name        String
+  unitPrice   Int
+  quantity    Int
+  image       String?
+
+  @@index([orderId])
 }
 
 model ProductSale {
@@ -576,6 +754,13 @@ model Feedback {
   booking   Booking? @relation(fields: [bookingId], references: [id])
   rating    Int
   comment   String?
+  isPublished Boolean @default(false)
+  /** Set when the client proved they hold the phone number on the booking. */
+  verifiedAt  DateTime?
+  /** Set when the owner rejected the review (e.g. suspected fake); it then counts nowhere. */
+  removedAt     DateTime?
+  removedBy     String?
+  removalReason String?
   createdAt DateTime @default(now())
 }
 
@@ -588,4 +773,70 @@ model LoyaltyPoint {
   createdAt DateTime @default(now())
 
   @@index([clientId, createdAt])
+}
+// Which services a staff member performs. A person with no rows here can do every service.
+model StaffService {
+  staffId   String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([staffId, serviceId])
+  @@index([serviceId])
+}
+
+model GalleryImage {
+  id          String   @id @default(cuid())
+  branchId    String
+  branch      Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  url         String
+  publicId    String   @unique
+  caption     String?
+  sortOrder   Int      @default(0)
+  isPublished Boolean  @default(true)
+  likeCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([branchId, isPublished, sortOrder])
+}
+
+enum ComplaintStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+model Complaint {
+  id             String          @id @default(cuid())
+  branchId       String
+  branch         Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  bookingId      String?
+  booking        Booking?        @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  clientId       String?
+  client         Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  name           String
+  phone          String
+  category       String          @default("OTHER")
+  message        String
+  status         ComplaintStatus @default(OPEN)
+  resolutionNote String?
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@index([branchId, status, createdAt])
+}
+
+// Privacy-friendly, cookie-free site analytics. No IP address or personal data is stored.
+model AnalyticsEvent {
+  id        String   @id @default(cuid())
+  type      String
+  path      String
+  sessionId String
+  referrer  String?
+  device    String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([type, createdAt])
 }

@@ -1,176 +1,334 @@
+import { randomBytes } from "node:crypto";
+import { currentPrice } from "../../utils/money";
 import { prisma } from "../../config/db";
+import type { Prisma } from "../../generated/prisma/client";
 import { AppError } from "../../utils/errors";
-import type { CreateBookingDto, RescheduleBookingDto } from "./booking.schema";
-import { getAvailableSlots } from "../availability/availability.service";
-import { randomBytes } from "crypto";
+import { normalizePhone } from "../../utils/phone";
+import { dayEnd, dayStart } from "../../utils/time";
+import { isSlotAvailable } from "../availability/availability.service";
+import { notifyBookingCancelled, notifyBookingConfirmed, notifyBookingRescheduled } from "../notification/notify";
+import type { CheckoutDto, CreateBookingDto, RescheduleBookingDto } from "./booking.schema";
 
-/**
- * Converts a UTC Date to Nairobi date string ("YYYY-MM-DD") and time string ("HH:mm").
- * The Availability Engine works in Nairobi time, so we must compare in the same timezone.
- */
-function toNairobiDateAndTime(utcDate: Date): { dateStr: string; timeStr: string } {
-  const nairobi = new Date(utcDate.toLocaleString("en-US", { timeZone: "Africa/Nairobi" }));
-  const dateStr = nairobi.toISOString().split("T")[0]!;
-  const hours = String(nairobi.getHours()).padStart(2, "0");
-  const mins = String(nairobi.getMinutes()).padStart(2, "0");
-  return { dateStr, timeStr: `${hours}:${mins}` };
+type Db = Prisma.TransactionClient | typeof prisma;
+
+const isOverlapError = (error: any) =>
+  error?.code === "23P01" ||
+  error?.cause?.code === "23P01" ||
+  String(error?.message ?? "").includes("Booking_no_overlap");
+
+export const newManageToken = () => randomBytes(24).toString("hex");
+
+/** Finds a client of this branch by phone, creating one if needed (carrying allergy notes over from other branches). */
+export async function findOrCreateClient(
+  db: Db,
+  branchId: string,
+  input: { phone: string; name: string; allergies?: string | null },
+) {
+  const phone = normalizePhone(input.phone);
+  if (!phone) throw new AppError(400, "Invalid Kenyan phone number", "INVALID_PHONE");
+
+  const existing = await db.client.findUnique({ where: { branchId_phone: { branchId, phone } } });
+  if (existing) {
+    if (existing.isBlocked) throw new AppError(403, "This client cannot make bookings. Please contact the salon.", "CLIENT_BLOCKED");
+    if (input.allergies && input.allergies !== existing.allergies) {
+      return db.client.update({ where: { id: existing.id }, data: { allergies: input.allergies } });
+    }
+    return existing;
+  }
+  // Allergy notes matter for safety, so a customer who has visited another branch brings them along.
+  const elsewhere = await db.client.findFirst({ where: { phone, branchId: { not: branchId } }, orderBy: { updatedAt: "desc" }, select: { allergies: true } });
+  return db.client.create({
+    data: { branchId, phone, name: input.name, allergies: input.allergies ?? elsewhere?.allergies ?? null, ...(elsewhere ? { isFirstLash: false } : {}) },
+  });
 }
 
-export async function createBooking(branchId: string, data: CreateBookingDto) {
-  // 1. Verify Client belongs to this branch
-  const client = await prisma.client.findFirst({ where: { id: data.clientId, branchId } });
-  if (!client) throw new AppError(404, "Client not found", "NOT_FOUND");
-
-  // 2. Verify Service belongs to this branch and is active
-  const service = await prisma.service.findFirst({ 
-    where: { id: data.serviceId, branchId, isActive: true } 
+/** Single place that writes a booking row and converts the DB's double-booking guard into a friendly error. */
+export async function insertBooking(
+  db: Db,
+  args: {
+    branchId: string;
+    clientId: string;
+    staffId: string;
+    serviceId: string;
+    startAt: Date;
+    source: "WALKIN" | "ONLINE" | "PHONE";
+    discount?: number;
+    depositPaid?: number;
+    notes?: string | null;
+    allergies?: string | null;
+  },
+) {
+  const service = await db.service.findFirst({
+    where: { id: args.serviceId, branchId: args.branchId, isActive: true },
   });
   if (!service) throw new AppError(404, "Service not found or inactive", "NOT_FOUND");
 
-  // 3. Parse start time and convert to NAIROBI time for comparison
-  const startDate = new Date(data.startAt);
-  const { dateStr, timeStr: startTimeStr } = toNairobiDateAndTime(startDate);
+  const today = currentPrice(service);
+  const discount = Math.min(args.discount ?? 0, today);
+  const endAt = new Date(args.startAt.getTime() + service.durationMin * 60_000);
 
-  // 4. Double-check with the Availability Engine (which works in Nairobi time)
-  const availability = await getAvailableSlots(branchId, {
-    staffId: data.staffId,
-    date: dateStr,
-    serviceId: data.serviceId,
-  });
-
-  const isSlotFree = availability.availableSlots.some(
-    (slot) => slot.startTime === startTimeStr
-  );
-
-  if (!isSlotFree) {
-    throw new AppError(409, "This time slot is no longer available", "SLOT_TAKEN");
-  }
-
-  // 5. Calculate endAt time
-  const endAt = new Date(startDate);
-  endAt.setMinutes(endAt.getMinutes() + service.durationMin);
-
-  // 6. Generate a secure manageToken
-  const manageToken = randomBytes(24).toString("hex");
-
-  // 7. Create the booking
   try {
-    const booking = await prisma.booking.create({
+    return await db.booking.create({
       data: {
-        branchId,
-        clientId: data.clientId,
-        staffId: data.staffId,
-        serviceId: data.serviceId,
-        startAt: startDate,
+        branchId: args.branchId,
+        clientId: args.clientId,
+        staffId: args.staffId,
+        serviceId: args.serviceId,
+        startAt: args.startAt,
         endAt,
         status: "CONFIRMED",
-        source: data.source,
-        price: service.price,
-        manageToken,
-        notes: data.notes ?? null,
-        allergies: client.allergies,
-      },
-      include: {
-        staff: { select: { name: true } },
-        service: { select: { name: true } },
-        client: { select: { name: true } },
+        source: args.source,
+        price: today,
+        discount,
+        depositPaid: args.depositPaid ?? 0,
+        manageToken: newManageToken(),
+        notes: args.notes ?? null,
+        allergies: args.allergies ?? null,
       },
     });
-
-    const b = booking as any;
-
-    return {
-      bookingId: b.id,
-      startAt: b.startAt,
-      endAt: b.endAt,
-      status: b.status,
-      staffName: b.staff.name,
-      serviceName: b.service.name,
-      clientName: b.client.name,
-      price: b.price,
-      manageToken: b.manageToken,
-    };
   } catch (error: any) {
-    if (error.code === "23P01" || error.message?.includes("Booking_no_overlap")) {
-      throw new AppError(409, "Double booking detected at database level", "SLOT_TAKEN");
-    }
+    if (isOverlapError(error)) throw new AppError(409, "That time slot is no longer available", "SLOT_TAKEN");
     throw error;
   }
 }
 
-export async function listBookings(branchId: string, dateString?: string) {
-  const whereClause: any = { branchId };
+const bookingInclude = {
+  client: { select: { id: true, name: true, phone: true, allergies: true } },
+  staff: { select: { id: true, name: true } },
+  service: { select: { id: true, name: true, durationMin: true } },
+  payments: { select: { id: true, amount: true, method: true, kind: true, mpesaReceipt: true, createdAt: true } },
+} satisfies Prisma.BookingInclude;
 
-  if (dateString) {
-    const dayStart = new Date(`${dateString}T00:00:00+03:00`);
-    const dayEnd = new Date(`${dateString}T23:59:59+03:00`);
-    whereClause.startAt = { gte: dayStart, lte: dayEnd };
-  }
+type BookingWithRelations = Prisma.BookingGetPayload<{ include: typeof bookingInclude }>;
 
-  return prisma.booking.findMany({
-    where: whereClause,
-    include: {
-      client: { select: { name: true, phone: true } },
-      staff: { select: { name: true } },
-      service: { select: { name: true, durationMin: true } },
-    },
-    orderBy: { startAt: "asc" },
-  });
+/** Adds money fields the UI needs everywhere: what has been paid, and what is still owed. */
+export function withBalance(b: BookingWithRelations) {
+  const paidTotal = b.payments.reduce((sum, p) => sum + p.amount, 0);
+  const due = Math.max(0, b.price - b.discount);
+  return { ...b, paidTotal, amountDue: due, balance: Math.max(0, due - paidTotal) };
 }
 
-export async function cancelBooking(branchId: string, bookingId: string) {
-  const booking = await prisma.booking.findFirst({
-    where: { id: bookingId, branchId },
+export async function createBooking(branchId: string, data: CreateBookingDto, actorId?: string) {
+  const startAt = new Date(data.startAt);
+
+  const staff = await prisma.staff.findFirst({ where: { id: data.staffId, branchId, isActive: true } });
+  if (!staff) throw new AppError(404, "Staff member not found", "NOT_FOUND");
+
+  const available = await isSlotAvailable(branchId, data.staffId, data.serviceId, startAt);
+  if (!available) throw new AppError(409, "That time slot is not available for this stylist", "SLOT_TAKEN");
+
+  const booking = await prisma.$transaction(async (tx) => {
+    let clientId = data.clientId;
+    let allergies: string | null = null;
+
+    if (clientId) {
+      const client = await tx.client.findFirst({ where: { id: clientId, branchId } });
+      if (!client) throw new AppError(404, "Client not found", "NOT_FOUND");
+      if (client.isBlocked) throw new AppError(403, "This client is blocked", "CLIENT_BLOCKED");
+      allergies = client.allergies;
+    } else {
+      const client = await findOrCreateClient(tx, branchId, { phone: data.clientPhone!, name: data.clientName! });
+      clientId = client.id;
+      allergies = client.allergies;
+    }
+
+    return insertBooking(tx, {
+      branchId,
+      clientId,
+      staffId: data.staffId,
+      serviceId: data.serviceId,
+      startAt,
+      source: data.source,
+      discount: data.discount,
+      notes: data.notes ?? null,
+      allergies,
+    });
   });
 
+  if (actorId) {
+    await prisma.auditLog
+      .create({ data: { action: "CREATE", entity: "Booking", entityId: booking.id, branchId, actorId } })
+      .catch(() => {});
+  }
+  void notifyBookingConfirmed(booking.id);
+  return getBooking(branchId, booking.id);
+}
+
+export async function listBookings(
+  branchId: string,
+  filter: { date?: string | undefined; from?: string | undefined; to?: string | undefined; staffId?: string | undefined; clientId?: string | undefined; status?: string | undefined },
+) {
+  const where: Prisma.BookingWhereInput = { branchId };
+
+  if (filter.date) {
+    where.startAt = { gte: dayStart(filter.date), lt: dayEnd(filter.date) };
+  } else if (filter.from || filter.to) {
+    where.startAt = {
+      ...(filter.from ? { gte: dayStart(filter.from) } : {}),
+      ...(filter.to ? { lt: dayEnd(filter.to) } : {}),
+    };
+  }
+  if (filter.staffId) where.staffId = filter.staffId;
+  if (filter.clientId) where.clientId = filter.clientId;
+  if (filter.status) where.status = filter.status as any;
+
+  const rows = await prisma.booking.findMany({
+    where,
+    include: bookingInclude,
+    orderBy: { startAt: "asc" },
+    take: 500,
+  });
+  return rows.map(withBalance);
+}
+
+export async function getBooking(branchId: string, bookingId: string) {
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, branchId }, include: bookingInclude });
+  if (!booking) throw new AppError(404, "Booking not found", "NOT_FOUND");
+  return withBalance(booking);
+}
+
+export async function setStatus(branchId: string, bookingId: string, status: "CONFIRMED" | "COMPLETED" | "NO_SHOW", actorId?: string) {
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, branchId } });
+  if (!booking) throw new AppError(404, "Booking not found", "NOT_FOUND");
+  if (booking.status === "CANCELLED") throw new AppError(400, "A cancelled booking cannot be changed", "BAD_REQUEST");
+  if (booking.status === "COMPLETED" && status !== "COMPLETED") {
+    throw new AppError(400, "A completed booking cannot be changed", "BAD_REQUEST");
+  }
+
+  try {
+    await prisma.booking.update({ where: { id: bookingId }, data: { status } });
+  } catch (error) {
+    // Re-confirming a no-show can collide with a booking that took the freed slot.
+    if (isOverlapError(error)) throw new AppError(409, "That time has since been booked by someone else", "SLOT_TAKEN");
+    throw error;
+  }
+  await prisma.auditLog
+    .create({ data: { action: "BOOKING_STATUS", entity: "Booking", entityId: bookingId, branchId, before: { status: booking.status }, after: { status }, ...(actorId ? { actorId } : {}) } })
+    .catch(() => {});
+  return getBooking(branchId, bookingId);
+}
+
+/**
+ * Collects the remaining balance, records the payment and completes the booking in one transaction.
+ */
+export async function checkout(branchId: string, bookingId: string, data: CheckoutDto, actorId?: string) {
+  await prisma.$transaction(async (tx) => {
+    const booking = await tx.booking.findFirst({ where: { id: bookingId, branchId }, include: { payments: true } });
+    if (!booking) throw new AppError(404, "Booking not found", "NOT_FOUND");
+    if (booking.status === "CANCELLED" || booking.status === "NO_SHOW") {
+      throw new AppError(400, "This booking was cancelled or marked no-show", "BAD_REQUEST");
+    }
+
+    const discount = Math.min(data.discount ?? booking.discount, booking.price);
+    const due = booking.price - discount;
+    const alreadyPaid = booking.payments.reduce((sum, p) => sum + p.amount, 0);
+    const balance = Math.max(0, due - alreadyPaid);
+    const amount = data.amount ?? balance;
+
+    if (amount > balance) {
+      throw new AppError(400, `Amount is more than the balance of KES ${balance.toLocaleString()}`, "OVERPAYMENT");
+    }
+
+    if (discount !== booking.discount) {
+      await tx.auditLog.create({
+        data: {
+          action: "DISCOUNT",
+          entity: "Booking",
+          entityId: bookingId,
+          branchId,
+          before: { discount: booking.discount },
+          after: { discount },
+          ...(actorId ? { actorId } : {}),
+        },
+      });
+    }
+
+    if (amount > 0) {
+      if (data.mpesaReceipt) {
+        const dup = await tx.payment.findUnique({ where: { mpesaReceipt: data.mpesaReceipt } });
+        if (dup) throw new AppError(409, "That M-Pesa code has already been used", "DUPLICATE_RECEIPT");
+      }
+      await tx.payment.create({
+        data: {
+          branchId,
+          bookingId,
+          amount,
+          method: data.method,
+          kind: "BALANCE",
+          mpesaReceipt: data.method === "MPESA" ? (data.mpesaReceipt ?? null) : null,
+          notes: data.notes ?? null,
+          recordedBy: actorId ?? null,
+        },
+      });
+    }
+
+    const fullyPaid = alreadyPaid + amount >= due;
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: { discount, paid: fullyPaid, status: fullyPaid ? "COMPLETED" : booking.status },
+    });
+  });
+
+  return getBooking(branchId, bookingId);
+}
+
+export async function cancelBooking(branchId: string, bookingId: string, opts: { keepDeposit?: boolean } = {}, actorId?: string) {
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, branchId } });
   if (!booking) throw new AppError(404, "Booking not found", "NOT_FOUND");
   if (booking.status === "CANCELLED") throw new AppError(400, "Booking is already cancelled", "BAD_REQUEST");
+  if (booking.status === "COMPLETED") throw new AppError(400, "A completed booking cannot be cancelled", "BAD_REQUEST");
 
   await prisma.booking.update({
     where: { id: bookingId },
-    data: { 
+    data: {
       status: "CANCELLED",
       cancelledAt: new Date(),
+      depositRefundDue: booking.depositPaid > 0 && !opts.keepDeposit,
     },
   });
-
-  return { message: "Booking cancelled successfully" };
+  await prisma.auditLog
+    .create({ data: { action: "BOOKING_STATUS", entity: "Booking", entityId: bookingId, branchId, before: { status: booking.status }, after: { status: "CANCELLED" }, ...(actorId ? { actorId } : {}) } })
+    .catch(() => {});
+  void notifyBookingCancelled(bookingId);
+  return getBooking(branchId, bookingId);
 }
 
-export async function rescheduleBooking(branchId: string, bookingId: string, data: RescheduleBookingDto) {
-  const booking = await prisma.booking.findFirst({
-    where: { id: bookingId, branchId },
-    include: { service: true },
-  });
-
+export async function rescheduleBooking(
+  branchId: string,
+  bookingId: string,
+  data: RescheduleBookingDto,
+  opts: { publicRules?: boolean } = {},
+) {
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, branchId } });
   if (!booking) throw new AppError(404, "Booking not found", "NOT_FOUND");
-
-  const newStartDate = new Date(data.newStartAt);
-  const { dateStr, timeStr: startTimeStr } = toNairobiDateAndTime(newStartDate);
-
-  const availability = await getAvailableSlots(branchId, {
-    staffId: data.staffId || booking.staffId,
-    date: dateStr,
-    serviceId: booking.serviceId,
-  });
-
-  const isSlotFree = availability.availableSlots.some(
-    (slot) => slot.startTime === startTimeStr
-  );
-
-  if (!isSlotFree) {
-    throw new AppError(409, "The new time slot is not available", "SLOT_TAKEN");
+  if (booking.status === "CANCELLED" || booking.status === "COMPLETED" || booking.status === "NO_SHOW") {
+    throw new AppError(400, "This booking can no longer be moved", "BAD_REQUEST");
   }
 
-  const newEndAt = new Date(newStartDate);
-  newEndAt.setMinutes(newEndAt.getMinutes() + booking.service.durationMin);
+  const staffId = data.staffId ?? booking.staffId;
+  const newStart = new Date(data.newStartAt);
 
-  return prisma.booking.update({
-    where: { id: bookingId },
-    data: {
-      startAt: newStartDate,
-      endAt: newEndAt,
-      staffId: data.staffId || booking.staffId,
-    },
+  const available = await isSlotAvailable(branchId, staffId, booking.serviceId, newStart, {
+    excludeBookingId: bookingId,
+    ...(opts.publicRules ? { publicRules: true } : {}),
   });
+  if (!available) throw new AppError(409, "The new time is not available", "SLOT_TAKEN");
+
+  const service = await prisma.service.findUniqueOrThrow({ where: { id: booking.serviceId } });
+  try {
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        startAt: newStart,
+        endAt: new Date(newStart.getTime() + service.durationMin * 60_000),
+        staffId,
+        reminderSentAt: null,
+      },
+    });
+  } catch (error) {
+    if (isOverlapError(error)) throw new AppError(409, "The new time is not available", "SLOT_TAKEN");
+    throw error;
+  }
+  void notifyBookingRescheduled(bookingId);
+  return getBooking(branchId, bookingId);
 }

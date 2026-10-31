@@ -10,9 +10,9 @@ export async function payrollRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
   app.addHook("preHandler", branchScope);
 
-  // Only OWNER and MANAGER can view payroll runs
+  // Payroll shows everyone's pay, so only the owner sees it.
   const canView = { 
-    preHandler: [authorize(Role.OWNER, Role.MANAGER)] 
+    preHandler: [authorize(Role.OWNER)] 
   };
   
   // Only OWNER can generate, adjust, or approve payroll

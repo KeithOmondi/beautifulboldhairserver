@@ -1,3 +1,5 @@
+import { commissionFor, effectiveRate } from "../../engines/payroll/commission";
+import { dayEnd, dayStart, monthBounds } from "../../utils/time";
 import { prisma } from "../../config/db";
 import { AppError } from "../../utils/errors";
 import type { GeneratePayrollDto, CreateAdjustmentDto } from "./payroll.schema";
@@ -8,7 +10,6 @@ export async function generatePayroll(branchId: string, data: GeneratePayrollDto
   const month = Number(monthStr) - 1;
 
   const startDate = new Date(Date.UTC(year, month, 1, 12, 0, 0));
-  const endDate = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59));
 
   // 1. Prevent duplicate runs
   const existingRun = await prisma.payrollRun.findFirst({
@@ -39,7 +40,7 @@ export async function generatePayroll(branchId: string, data: GeneratePayrollDto
       branchId,
       status: "COMPLETED",
       paid: true,
-      startAt: { gte: startDate, lte: endDate },
+      startAt: { gte: dayStart(`${data.month}-01`), lt: dayEnd(monthBounds(`${data.month}-01`).last) },
     },
   });
 
@@ -53,9 +54,8 @@ export async function generatePayroll(branchId: string, data: GeneratePayrollDto
 
       for (const booking of staffBookings) {
         const override = staff.overrides.find((o) => o.serviceId === booking.serviceId);
-        const pct = override ? override.pct : staff.commissionPct || 0;
-        const netPrice = booking.price - booking.discount;
-        const commission = Math.floor((netPrice * pct) / 10000);
+        const pct = effectiveRate(staff.commissionPct, override?.pct);
+        const commission = commissionFor(booking.price, booking.discount, pct);
         totalCommission += commission;
       }
     }

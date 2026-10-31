@@ -16,8 +16,9 @@ export async function clientRoutes(app: FastifyInstance) {
   };
 
   // Everyone can view the client list and individual clients
-  app.get("/", controller.list);
-  app.get("/:id", controller.getById);
+  // Contact details are limited to front-desk roles; stylists use the calendar instead.
+  app.get("/", canManage, controller.list);
+  app.get("/:id", canManage, controller.getById);
 
   // Only front-desk staff can create or update
   app.post("/", canManage, controller.create);

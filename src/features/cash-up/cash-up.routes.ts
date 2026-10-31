@@ -4,6 +4,7 @@ import { branchScope } from "../../middleware/branch-scope";
 import { authorize } from "../../middleware/role.middleware";
 import * as controller from "./cash-up.controller";
 import { Role } from "../../generated/prisma/client";
+import { requires } from "../../utils/access";
 
 export async function cashUpRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
@@ -15,7 +16,7 @@ export async function cashUpRoutes(app: FastifyInstance) {
   
   // Only OWNER/MANAGER can approve (lock) the day
   const canApprove = { 
-    preHandler: [authorize(Role.OWNER, Role.MANAGER)] 
+    preHandler: [authorize(Role.OWNER, Role.MANAGER), requires("cashUp")] 
   };
 
   app.get("/", canManage, controller.list);

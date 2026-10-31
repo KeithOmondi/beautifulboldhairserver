@@ -4,8 +4,10 @@ import { prisma } from "../config/db";
 
 export async function authenticate(req: FastifyRequest) {
   try {
-    // 1. Verify JWT signature and expiration
-    await req.jwtVerify();
+    // 1. Verify the JWT from the COOKIE, not the header
+    await req.jwtVerify({ 
+      onlyCookie: true // <--- Tells Fastify to look in req.cookies for the token
+    });
   } catch (err: any) {
     // Give the frontend a specific error if the token is just expired
     if (err.code === "FAST_JWT_EXPIRED") {
@@ -14,11 +16,15 @@ export async function authenticate(req: FastifyRequest) {
     throw new AppError(401, "Please log in", "UNAUTHORIZED");
   }
 
+  // A refresh token must never work as an access token.
+  if ((req.user as unknown as { type?: string }).type === "refresh") {
+    throw new AppError(401, "Please log in", "UNAUTHORIZED");
+  }
+
   // 2. Verify the user still exists and is active in the database
-  // This instantly blocks fired staff, even if their token hasn't expired yet.
   const staff = await prisma.staff.findUnique({
     where: { id: req.user.sub },
-    select: { id: true, isActive: true, role: true, branchId: true },
+    select: { id: true, isActive: true, role: true, branchId: true, canSwitchBranches: true },
   });
 
   if (!staff) {
@@ -30,7 +36,8 @@ export async function authenticate(req: FastifyRequest) {
   }
 
   // 3. Sync the token with the database
-  // If an admin changes their role or branch, it updates immediately.
   req.user.role = staff.role;
   req.user.branchId = staff.branchId;
+  req.user.homeBranchId = staff.branchId;
+  req.user.canSwitchBranches = staff.canSwitchBranches;
 }

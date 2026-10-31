@@ -1,27 +1,25 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { handleMpesaCallback } from "./mpesa-callback.service";
-import { prisma } from "../../config/db";
+import { env } from "../../config/env";
+import { ACCEPTED, handleStkCallback, type StkCallbackBody } from "./mpesa-callback.service";
 
+/**
+ * POST /api/v1/public/payment-callback?secret=...
+ * Safaricom has no request signature, so an unguessable secret in the callback URL is our authentication.
+ * Always answers 200 so Safaricom does not retry forever.
+ */
 export async function mpesaCallback(req: FastifyRequest, reply: FastifyReply) {
-  // Safaricom posts a nested JSON body
-  const payload = req.body as any;
-
-  // Safaricom doesn't send a branch ID, so we use the first active branch (single-branch setup)
-  const branch = await prisma.branch.findFirst({ where: { isActive: true } });
-  
-  if (!branch) {
-    return reply.send({ ResultCode: 0, ResultDesc: "No Branch" });
+  if (env.MPESA_CALLBACK_SECRET) {
+    const secret = (req.query as { secret?: string }).secret;
+    if (secret !== env.MPESA_CALLBACK_SECRET) {
+      req.log.warn({ ip: req.ip }, "M-Pesa callback rejected: bad secret");
+      return reply.status(403).send({ ResultCode: 1, ResultDesc: "Forbidden" });
+    }
   }
 
   try {
-    const result = await handleMpesaCallback(branch.id, payload);
-    return reply.send(result);
+    return reply.send(await handleStkCallback((req.body ?? {}) as StkCallbackBody));
   } catch (error) {
-    // Safely handle the unknown error type
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    req.log.error({ err: errorMessage }, "M-Pesa Callback Error");
-    
-    // Always return 200 OK to Safaricom
-    return reply.send({ ResultCode: 0, ResultDesc: "Accepted" });
+    req.log.error({ err: error }, "M-Pesa callback processing failed");
+    return reply.send(ACCEPTED);
   }
 }

@@ -1,96 +1,93 @@
 /**
- * Time Utility
- * 
- * All times in this application are normalized to Africa/Nairobi (EAT).
- * Kenya does not observe Daylight Saving Time, so the offset is always UTC+3.
- * 
- * However, we use Intl.DateTimeFormat to be 100% safe and handle date math 
- * without external libraries like date-fns or moment.
+ * All business logic runs in Africa/Nairobi (EAT). Kenya has no daylight saving, so the offset is
+ * a constant UTC+3 and we can do exact arithmetic without depending on the server's own timezone.
  */
 
-const TIMEZONE = "Africa/Nairobi";
+export const TIMEZONE = "Africa/Nairobi";
+const OFFSET_MS = 3 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-/**
- * Returns the current date/time in Nairobi.
- */
-export function nowInNairobi(): Date {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: TIMEZONE }));
+/** "YYYY-MM-DD" calendar date in Nairobi for an instant. */
+export function nairobiDateString(date: Date): string {
+  return new Date(date.getTime() + OFFSET_MS).toISOString().slice(0, 10);
 }
 
-/**
- * Formats a Date object into a readable string for the salon staff.
- * Example: "Mon, 27 Oct 2026 at 14:30"
- */
+/** Minutes since local midnight (Nairobi) for an instant. */
+export function getMinutesFromMidnight(date: Date): number {
+  const local = new Date(date.getTime() + OFFSET_MS);
+  return local.getUTCHours() * 60 + local.getUTCMinutes();
+}
+
+export function minutesToHHmm(minutes: number): string {
+  const h = Math.floor(minutes / 60).toString().padStart(2, "0");
+  const m = (minutes % 60).toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+/** "HH:mm" in Nairobi for an instant. */
+export function nairobiTimeString(date: Date): string {
+  return minutesToHHmm(getMinutesFromMidnight(date));
+}
+
+export function hhmmToMinutes(value: string): number {
+  const [h, m] = value.split(":").map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+/** Instant of local midnight (Nairobi) at the start of the given "YYYY-MM-DD". */
+export function dayStart(dateStr: string): Date {
+  return new Date(`${dateStr}T00:00:00+03:00`);
+}
+
+/** Exclusive end of the day: local midnight of the following day. */
+export function dayEnd(dateStr: string): Date {
+  return new Date(dayStart(dateStr).getTime() + DAY_MS);
+}
+
+/** Instant at `minutes` after local midnight on `dateStr`. */
+export function atMinutes(dateStr: string, minutes: number): Date {
+  return new Date(dayStart(dateStr).getTime() + minutes * 60_000);
+}
+
+/** Day of week (0 = Sunday) for a "YYYY-MM-DD" calendar date. */
+export function dayOfWeek(dateStr: string): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
+}
+
+export function addDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d! + days)).toISOString().slice(0, 10);
+}
+
+export function todayString(now = new Date()): string {
+  return nairobiDateString(now);
+}
+
+/** First and last calendar day (YYYY-MM-DD) of the month containing dateStr. */
+export function monthBounds(dateStr: string): { first: string; last: string } {
+  const [y, m] = dateStr.split("-").map(Number);
+  const first = `${y}-${String(m).padStart(2, "0")}-01`;
+  const last = new Date(Date.UTC(y!, m!, 0)).toISOString().slice(0, 10);
+  return { first, last };
+}
+
 export function formatDateTime(date: Date): string {
   return new Intl.DateTimeFormat("en-KE", {
     timeZone: TIMEZONE,
     weekday: "short",
     day: "numeric",
     month: "short",
-    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   }).format(date);
 }
 
-/**
- * Formats a Date object into just a time string (HH:mm).
- * Used for shift displays and calendar slots.
- */
 export function formatTime(date: Date): string {
-  return new Intl.DateTimeFormat("en-KE", {
-    timeZone: TIMEZONE,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return nairobiTimeString(date);
 }
 
-/**
- * Converts a Date object into "minutes from midnight" for a specific day.
- * This is the exact format the Availability Engine uses to calculate overlaps.
- * 
- * Example: A date of "2026-10-27T14:30:00+03:00" returns 870 (14 * 60 + 30).
- */
-export function getMinutesFromMidnight(date: Date): number {
-  const formatter = new Intl.DateTimeFormat("en-GB", {
-    timeZone: TIMEZONE,
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  });
-
-  const parts = formatter.formatToParts(date);
-  const hours = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
-  const minutes = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
-  
-  return hours * 60 + minutes;
-}
-
-/**
- * Checks if two time ranges overlap.
- * @param start1 Start time of first slot (in minutes from midnight)
- * @param end1 End time of first slot
- * @param start2 Start time of second slot
- * @param end2 End time of second slot
- */
 export function timesOverlap(start1: number, end1: number, start2: number, end2: number): boolean {
   return start1 < end2 && start2 < end1;
-}
-
-/**
- * Returns the start and end of the current day in Nairobi time.
- * Useful for daily cash-up and reporting queries.
- */
-export function getTodayRange(): { start: Date; end: Date } {
-  const now = nowInNairobi();
-  
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-
-  const end = new Date(now);
-  end.setHours(23, 59, 59, 999);
-
-  return { start, end };
 }
