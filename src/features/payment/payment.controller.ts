@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import * as paymentService from "./payment.service";
+import { departmentOf } from "../../utils/access";
 import { createPaymentSchema } from "./payment.schema";
 
 /**
@@ -16,7 +17,7 @@ export async function create(req: FastifyRequest, reply: FastifyReply) {
  */
 export async function list(req: FastifyRequest, reply: FastifyReply) {
   const { date } = req.query as { date?: string };
-  const payments = await paymentService.listPayments(req.user.branchId, date);
+  const payments = await paymentService.listPayments(req.user.branchId, date, departmentOf(req.user));
   return reply.send(payments);
 }
 

@@ -39,6 +39,7 @@ export async function getStaffProfile(id: string) {
       role: true, 
       branchId: true, 
       canSwitchBranches: true,
+      department: true,
       isActive: true,
       mustChangePassword: true 
     },

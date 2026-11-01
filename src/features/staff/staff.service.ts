@@ -7,7 +7,7 @@ import type { Role } from "../../generated/prisma/client";
 import type { CreateStaffDto, UpdateStaffDto } from "./staff.schema";
 
 const select = {
-  id: true, name: true, email: true, phone: true, role: true, title: true, canSwitchBranches: true,
+  id: true, name: true, email: true, phone: true, role: true, title: true, canSwitchBranches: true, department: true,
   isActive: true, isBookable: true, weeklyHours: true,
   payType: true, monthlySalary: true, commissionPct: true, createdAt: true,
   services: { select: { serviceId: true } },
@@ -21,6 +21,11 @@ function assertCanAssign(actorRole: Role, target: Role) {
   if (actorRole === "OWNER") return;
   if (actorRole === "MANAGER" && (target === "RECEPTIONIST" || target === "WORKER")) return;
   throw new AppError(403, "Only an owner can create or change managers and owners", "FORBIDDEN");
+}
+
+/** A manager who looks after one side only can only manage front-desk people of that same side. */
+function assertSameSide(actorDept: string | null, target: { role: Role; department: string | null }) {
+  if (actorDept && target.role === "RECEPTIONIST" && target.department !== actorDept) throw new AppError(404, "Staff member not found", "NOT_FOUND");
 }
 
 const PAY_FIELDS = ["payType", "monthlySalary", "commissionPct"] as const;
@@ -65,7 +70,7 @@ async function resolveBranch(current: string, chosen: string | undefined, actorR
   return b.id;
 }
 
-export async function createStaff(activeBranchId: string, data: CreateStaffDto, actorRole: Role, actorSpans = false, canSetPay = actorRole === "OWNER") {
+export async function createStaff(activeBranchId: string, data: CreateStaffDto, actorRole: Role, actorSpans = false, canSetPay = actorRole === "OWNER", actorDept: string | null = null) {
   const branchId = await resolveBranch(activeBranchId, data.staffBranchId, actorRole, actorSpans);
   // Someone who may not see pay cannot set it either: the new person starts on the defaults.
   if (!canSetPay) data = { ...data, payType: "SALARY_ONLY" } as CreateStaffDto;
@@ -92,6 +97,8 @@ export async function createStaff(activeBranchId: string, data: CreateStaffDto, 
       passwordHash: await hashPassword(temporaryPassword),
       role: data.role,
       canSwitchBranches: Boolean(data.canSwitchBranches),
+      // A manager limited to one side can only add people to that side; an owner (or unrestricted manager) chooses.
+      department: actorDept ?? data.department ?? null,
       title: data.title ?? null,
       isBookable: data.isBookable,
       ...(data.weeklyHours ? { weeklyHours: data.weeklyHours } : {}),
@@ -107,7 +114,7 @@ export async function createStaff(activeBranchId: string, data: CreateStaffDto, 
   return { ...(canSetPay ? withServiceIds(staff) : withoutPay(withServiceIds(staff))), temporaryPassword };
 }
 
-export async function updateStaff(branchId: string, id: string, data: UpdateStaffDto, actorRole: Role, actorId: string, actorSpans = false, canSetPay = actorRole === "OWNER") {
+export async function updateStaff(branchId: string, id: string, data: UpdateStaffDto, actorRole: Role, actorId: string, actorSpans = false, canSetPay = actorRole === "OWNER", actorDept: string | null = null) {
   const moveTo = await resolveBranch(branchId, data.staffBranchId, actorRole, actorSpans);
   if (data.canSwitchBranches !== undefined && !(actorRole === "OWNER" && actorSpans)) throw new AppError(403, "Only an owner who manages all branches can change this", "FORBIDDEN");
   if (id === actorId && data.canSwitchBranches === false) throw new AppError(400, "You cannot take away your own access to other branches", "BAD_REQUEST");
@@ -115,13 +122,15 @@ export async function updateStaff(branchId: string, id: string, data: UpdateStaf
   if (!staff) throw new AppError(404, "Staff member not found", "NOT_FOUND");
 
   assertCanAssign(actorRole, staff.role); // you can only change people you are allowed to look after
+  assertSameSide(actorDept, staff);
+  if (data.department !== undefined && actorDept) throw new AppError(403, "Only an owner can move someone to the other side of the business", "FORBIDDEN");
   if (data.role !== undefined) assertCanAssign(actorRole, data.role);
   if (id === actorId && (data.isActive === false || (data.role !== undefined && data.role !== staff.role))) {
     throw new AppError(400, "You cannot deactivate or demote your own account", "BAD_REQUEST");
   }
 
   const updateData: Record<string, unknown> = {};
-  for (const key of ["name", "role", "title", "isActive", "isBookable", "payType", "monthlySalary", "commissionPct", "canSwitchBranches"] as const) {
+  for (const key of ["name", "role", "title", "isActive", "isBookable", "payType", "monthlySalary", "commissionPct", "canSwitchBranches", "department"] as const) {
     if ((PAY_FIELDS as readonly string[]).includes(key) && !canSetPay) continue; // pay is not theirs to change
     if (data[key] !== undefined) updateData[key] = data[key];
   }
@@ -153,10 +162,11 @@ export async function updateStaff(branchId: string, id: string, data: UpdateStaf
   return canSetPay ? updated : withoutPay(updated);
 }
 
-export async function resetStaffPassword(branchId: string, id: string, actorRole: Role) {
+export async function resetStaffPassword(branchId: string, id: string, actorRole: Role, actorDept: string | null = null) {
   const staff = await prisma.staff.findFirst({ where: { id, branchId } });
   if (!staff) throw new AppError(404, "Staff member not found", "NOT_FOUND");
   assertCanAssign(actorRole, staff.role);
+  assertSameSide(actorDept, staff);
 
   const temporaryPassword = randomBytes(6).toString("base64url");
   await prisma.staff.update({
@@ -166,11 +176,12 @@ export async function resetStaffPassword(branchId: string, id: string, actorRole
   return { temporaryPassword };
 }
 
-export async function deactivateStaff(branchId: string, id: string, actorId: string, actorRole: Role = "OWNER") {
+export async function deactivateStaff(branchId: string, id: string, actorId: string, actorRole: Role = "OWNER", actorDept: string | null = null) {
   if (id === actorId) throw new AppError(400, "You cannot deactivate your own account", "BAD_REQUEST");
   const staff = await prisma.staff.findFirst({ where: { id, branchId } });
   if (!staff) throw new AppError(404, "Staff member not found", "NOT_FOUND");
   assertCanAssign(actorRole, staff.role);
+  assertSameSide(actorDept, staff);
   await prisma.staff.update({ where: { id }, data: { isActive: false } });
   return { message: "Staff member deactivated successfully" };
 }

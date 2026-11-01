@@ -7,14 +7,20 @@ import type { CreateClientDto, UpdateClientDto } from "./client.schema";
  * Lists all clients for a branch.
  * Supports an optional search query (matches name or phone).
  */
-export async function listClients(branchId: string, searchQuery?: string) {
-  const whereClause: any = { branchId };
+/** Someone limited to one side of the business sees the clients who have had that side's services, plus brand-new clients with no bookings yet. */
+const visibleTo = (department: string | null) =>
+  department ? { OR: [{ bookings: { some: { service: { category: department } } } }, { bookings: { none: {} } }] } : {};
+
+export async function listClients(branchId: string, searchQuery?: string, department: string | null = null) {
+  const whereClause: any = { branchId, ...visibleTo(department) };
 
   if (searchQuery) {
-    whereClause.OR = [
+    const match = [
       { name: { contains: searchQuery, mode: "insensitive" } },
       { phone: { contains: searchQuery } },
     ];
+    // Keep the search and the department limit as two separate conditions.
+    whereClause.AND = [{ OR: match }];
   }
 
   const clients = await prisma.client.findMany({
@@ -26,7 +32,7 @@ export async function listClients(branchId: string, searchQuery?: string) {
   // Visit stats in one grouped query rather than per-client lookups.
   const stats = await prisma.booking.groupBy({
     by: ["clientId"],
-    where: { clientId: { in: clients.map((c) => c.id) }, status: "COMPLETED" },
+    where: { clientId: { in: clients.map((c) => c.id) }, status: "COMPLETED", ...(department ? { service: { category: department } } : {}) },
     _count: { _all: true },
     _max: { startAt: true },
     _sum: { price: true, discount: true },
@@ -47,11 +53,12 @@ export async function listClients(branchId: string, searchQuery?: string) {
 /**
  * Gets a single client with their recent booking history.
  */
-export async function getClientById(branchId: string, clientId: string) {
+export async function getClientById(branchId: string, clientId: string, department: string | null = null) {
   const client = await prisma.client.findFirst({
-    where: { id: clientId, branchId },
+    where: { id: clientId, branchId, ...visibleTo(department) },
     include: {
       bookings: {
+        ...(department ? { where: { service: { category: department } } } : {}),
         take: 10, // Only show the 10 most recent
         orderBy: { startAt: "desc" },
         include: {
@@ -100,10 +107,10 @@ export async function createClient(branchId: string, data: CreateClientDto) {
 /**
  * Updates an existing client.
  */
-export async function updateClient(branchId: string, clientId: string, data: UpdateClientDto) {
-  // 1. Verify client exists in this branch
+export async function updateClient(branchId: string, clientId: string, data: UpdateClientDto, department: string | null = null) {
+  // 1. Verify client exists in this branch (and, for someone limited to one side, is one they may see)
   const client = await prisma.client.findFirst({
-    where: { id: clientId, branchId },
+    where: { id: clientId, branchId, ...visibleTo(department) },
   });
   if (!client) throw new AppError(404, "Client not found", "NOT_FOUND");
 

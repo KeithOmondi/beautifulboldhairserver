@@ -237,6 +237,8 @@ model Staff {
   role          Role     @default(WORKER)
   /// May switch to other branches (e.g. an owner or a manager overseeing both). Everyone else is locked to their own branch.
   canSwitchBranches Boolean @default(false)
+  /// Which side of the business a receptionist or manager looks after ("Lashes" or "Hair & Wigs"). Empty = the whole branch.
+  department   String?
   phone         String   @unique
   email              String   @unique
   mustChangePassword Boolean  @default(false)

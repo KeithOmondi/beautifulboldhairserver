@@ -157,8 +157,9 @@ export async function createBooking(branchId: string, data: CreateBookingDto, ac
 export async function listBookings(
   branchId: string,
   filter: { date?: string | undefined; from?: string | undefined; to?: string | undefined; staffId?: string | undefined; clientId?: string | undefined; status?: string | undefined },
+  department: string | null = null,
 ) {
-  const where: Prisma.BookingWhereInput = { branchId };
+  const where: Prisma.BookingWhereInput = { branchId, ...(department ? { service: { category: department } } : {}) };
 
   if (filter.date) {
     where.startAt = { gte: dayStart(filter.date), lt: dayEnd(filter.date) };

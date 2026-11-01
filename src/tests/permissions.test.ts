@@ -185,6 +185,75 @@ describe.skipIf(!url)("permissions (integration)", () => {
     expect((await total("boss")).rows.every((r: { branchName: string }) => r.branchName.startsWith("Perm"))).toBe(true);
   });
 
+  it("a receptionist or manager limited to one side only sees and handles that side", async () => {
+    const mkUser = async (key: string, role: "RECEPTIONIST" | "MANAGER", department: string | null) => {
+      const u = await prisma.staff.create({ data: { branchId, name: key, email: `${key}-${suffix}@test.local`, phone: `+2547${Math.floor(Math.random() * 9e7 + 1e7)}`, passwordHash: "x", role, department, isBookable: false } });
+      ids[key] = u.id;
+      cookies[key] = `accessToken=${app.jwt.sign({ sub: u.id, role, branchId })}`;
+    };
+    await mkUser("recL", "RECEPTIONIST", "Lashes");
+    await mkUser("mgrL", "MANAGER", "Lashes");
+    await mkUser("recAll", "RECEPTIONIST", null);
+
+    const lash = await prisma.service.create({ data: { branchId, name: `Lash ${suffix}`, durationMin: 60, price: 3000, category: "Lashes" } });
+    const hair = await prisma.service.create({ data: { branchId, name: `Hair ${suffix}`, durationMin: 60, price: 5000, category: "Hair & Wigs" } });
+    const lashClient = await prisma.client.create({ data: { branchId, name: "Lash Lady", phone: newPhone().replace(/^0/, "+254") } });
+    const hairClient = await prisma.client.create({ data: { branchId, name: "Hair Lady", phone: newPhone().replace(/^0/, "+254") } });
+    const newClient = await prisma.client.create({ data: { branchId, name: "Brand New", phone: newPhone().replace(/^0/, "+254") } });
+    const at = (h: number) => new Date(Date.now() + 5 * 86_400_000 + h * 3_600_000);
+    const mkBooking = (clientId: string, serviceId: string, h: number) =>
+      prisma.booking.create({ data: { branchId, clientId, staffId: ids.sty!, serviceId, startAt: at(h), endAt: at(h + 1), status: "CONFIRMED", price: 3000, manageToken: randomBytes(12).toString("hex") } });
+    const lashBooking = await mkBooking(lashClient.id, lash.id, 0);
+    const hairBooking = await mkBooking(hairClient.id, hair.id, 2);
+    await prisma.payment.create({ data: { branchId, bookingId: lashBooking.id, amount: 500, method: "CASH", kind: "DEPOSIT" } });
+    await prisma.payment.create({ data: { branchId, bookingId: hairBooking.id, amount: 900, method: "CASH", kind: "DEPOSIT" } });
+
+    const range = "from=2000-01-01&to=2100-01-01";
+    const list = async (who: string) => (await call("GET", `/bookings?${range}`, { cookie: cookies[who]! })).json() as Array<{ id: string }>;
+    // The Lashes receptionist sees lash bookings only; an unrestricted one and the owner see both.
+    expect((await list("recL")).map((b) => b.id)).toEqual([lashBooking.id]);
+    expect((await list("recAll")).map((b) => b.id).sort()).toEqual([lashBooking.id, hairBooking.id].sort());
+    expect((await list("owner")).length).toBeGreaterThanOrEqual(2);
+
+    // Opening or changing the other side's booking looks like it does not exist.
+    expect((await call("GET", `/bookings/${lashBooking.id}`, { cookie: cookies.recL! })).statusCode).toBe(200);
+    for (const [m, p] of [["GET", ""], ["PATCH", "/status"], ["POST", "/cancel"], ["POST", "/checkout"]] as const) {
+      expect((await call(m, `/bookings/${hairBooking.id}${p}`, { cookie: cookies.recL!, ...(m === "GET" ? {} : { body: { status: "COMPLETED" } }) })).statusCode).toBe(404);
+    }
+    expect((await prisma.booking.findUniqueOrThrow({ where: { id: hairBooking.id } })).status).toBe("CONFIRMED");
+    // And cannot book a service from the other side.
+    const wrong = await call("POST", "/bookings", { cookie: cookies.recL!, body: { clientId: lashClient.id, staffId: ids.sty, serviceId: hair.id, startAt: at(30).toISOString(), source: "PHONE" } });
+    expect(wrong.statusCode).toBe(403);
+
+    // Clients: their own side's clients and brand-new ones, not the other side's.
+    const names = async (who: string) => ((await call("GET", "/clients", { cookie: cookies[who]! })).json() as Array<{ name: string }>).map((c) => c.name);
+    const mine = await names("recL");
+    expect(mine).toEqual(expect.arrayContaining(["Lash Lady", "Brand New"]));
+    expect(mine).not.toContain("Hair Lady");
+    expect(await names("recAll")).toContain("Hair Lady");
+    expect((await call("GET", `/clients/${hairClient.id}`, { cookie: cookies.recL! })).statusCode).toBe(404);
+
+    // Money: only their side's payments.
+    const pays = ((await call("GET", "/payments", { cookie: cookies.recL! })).json() as Array<{ amount: number }>).map((p) => p.amount);
+    expect(pays).toContain(500);
+    expect(pays).not.toContain(900);
+
+    // A manager limited to one side does not get the whole branch's revenue or till.
+    expect((await call("GET", "/dashboard", { cookie: cookies.mgrL! })).statusCode).toBe(403);
+    expect((await call("GET", "/settings/access", { cookie: cookies.mgrL! })).json()).toMatchObject({ reports: false, cashUp: false });
+
+    // Adding people: a limited manager can only add to their own side, and cannot move anyone to the other.
+    const added = await call("POST", "/staff", { cookie: cookies.mgrL!, body: { name: "Lash Desk", email: `ld-${suffix}@test.local`, phone: newPhone(), role: "RECEPTIONIST", department: "Hair & Wigs", isBookable: false } });
+    expect(added.statusCode).toBe(201);
+    expect(added.json().department).toBe("Lashes");
+    expect((await call("PATCH", `/staff/${added.json().id}`, { cookie: cookies.mgrL!, body: { department: "Hair & Wigs" } })).statusCode).toBe(403);
+    // The owner chooses freely.
+    const byOwner = await call("POST", "/staff", { cookie: cookies.owner!, body: { name: "Hair Desk", email: `hd-${suffix}@test.local`, phone: newPhone(), role: "RECEPTIONIST", department: "Hair & Wigs", isBookable: false } });
+    expect(byOwner.json().department).toBe("Hair & Wigs");
+    // A Lashes manager cannot touch the Hair & Wigs receptionist.
+    expect((await call("PATCH", `/staff/${byOwner.json().id}`, { cookie: cookies.mgrL!, body: { title: "x" } })).statusCode).toBe(404);
+  });
+
   it("only the front desk's own jobs stay open to the receptionist", async () => {
     expect((await call("GET", "/clients", { cookie: cookies.rec! })).statusCode).toBe(200);
     for (const path of ["/dashboard", "/analytics", "/expenses", "/branches/overview"]) {

@@ -29,6 +29,7 @@ export async function login(req: FastifyRequest, reply: FastifyReply) {
       role: staff.role,
       branchId: staff.branchId,
       canSwitchBranches: staff.canSwitchBranches,
+      department: staff.department,
       mustChangePassword: staff.mustChangePassword,
     },
   });

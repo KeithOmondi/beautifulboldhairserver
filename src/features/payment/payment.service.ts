@@ -59,10 +59,12 @@ export async function createPayment(branchId: string, data: CreatePaymentDto, ac
   });
 }
 
-export async function listPayments(branchId: string, dateString?: string) {
+export async function listPayments(branchId: string, dateString?: string, department: string | null = null) {
   return prisma.payment.findMany({
     where: {
       branchId,
+      // Someone limited to one side sees only the payments for that side's bookings.
+      ...(department ? { booking: { service: { category: department } } } : {}),
       ...(dateString ? { createdAt: { gte: dayStart(dateString), lt: dayEnd(dateString) } } : {}),
     },
     include: {

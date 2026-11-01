@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { Role, PayType } from "../../generated/prisma/client";
+import { HAIR_WIGS, LASHES } from "../../utils/service-category";
 
 const roleEnum = z.nativeEnum(Role);
 const payTypeEnum = z.nativeEnum(PayType);
+/** The side of the business a receptionist or manager looks after. Empty = the whole branch. */
+const departmentField = z.enum([LASHES, HAIR_WIGS]).nullable().optional();
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm");
 
 // { "1": { start: "09:00", end: "18:00" }, "0": null } keyed by day of week, 0 = Sunday
@@ -21,6 +24,7 @@ export const createStaffSchema = z.object({
   canSwitchBranches: z.boolean().optional(),
   /** Which branch they work at. Only an owner who manages all branches can pick one other than their own (named so the branch scope never overwrites it). */
   staffBranchId: z.string().min(1).optional(),
+  department: departmentField,
   title: z.string().trim().max(60).optional(),
   isBookable: z.boolean().default(true),
   /** Services this person performs. Empty / omitted = all services. */
@@ -38,6 +42,7 @@ export const updateStaffSchema = z.object({
   canSwitchBranches: z.boolean().optional(),
   /** Move them to another branch. Owner-only. */
   staffBranchId: z.string().min(1).optional(),
+  department: departmentField,
   title: z.string().trim().max(60).nullable().optional(),
   isActive: z.boolean().optional(),
   isBookable: z.boolean().optional(),

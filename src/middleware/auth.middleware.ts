@@ -24,7 +24,7 @@ export async function authenticate(req: FastifyRequest) {
   // 2. Verify the user still exists and is active in the database
   const staff = await prisma.staff.findUnique({
     where: { id: req.user.sub },
-    select: { id: true, isActive: true, role: true, branchId: true, canSwitchBranches: true },
+    select: { id: true, isActive: true, role: true, branchId: true, canSwitchBranches: true, department: true },
   });
 
   if (!staff) {
@@ -40,4 +40,5 @@ export async function authenticate(req: FastifyRequest) {
   req.user.branchId = staff.branchId;
   req.user.homeBranchId = staff.branchId;
   req.user.canSwitchBranches = staff.canSwitchBranches;
+  req.user.department = staff.department;
 }

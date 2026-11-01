@@ -1,6 +1,9 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import * as bookingService from "./booking.service";
+import { prisma } from "../../config/db";
+import { AppError } from "../../utils/errors";
+import { departmentOf } from "../../utils/access";
 import { getPaymentRequest, requestBalancePayment } from "./payment-request.service";
 import {
   cancelBookingSchema,
@@ -18,7 +21,7 @@ export async function list(req: FastifyRequest, reply: FastifyReply) {
   const query = listBookingsSchema.parse(req.query);
   // Stylists only ever see their own appointments.
   const staffId = req.user.role === "WORKER" ? req.user.sub : query.staffId;
-  return reply.send(await bookingService.listBookings(req.user.branchId, { ...query, staffId }));
+  return reply.send(await bookingService.listBookings(req.user.branchId, { ...query, staffId }, departmentOf(req.user)));
 }
 
 export async function get(req: FastifyRequest, reply: FastifyReply) {
@@ -29,8 +32,21 @@ export async function get(req: FastifyRequest, reply: FastifyReply) {
   return reply.send(booking);
 }
 
+/** A receptionist or manager limited to one side can only act on that side's bookings. Others get "not found", so nothing leaks. */
+export async function inMyDepartment(req: FastifyRequest) {
+  const dept = departmentOf(req.user);
+  if (!dept) return;
+  const b = await prisma.booking.findFirst({ where: { id: (req.params as { id?: string }).id ?? "", branchId: req.user.branchId }, select: { service: { select: { category: true } } } });
+  if (!b || b.service.category !== dept) throw new AppError(404, "Booking not found", "NOT_FOUND");
+}
+
 export async function create(req: FastifyRequest, reply: FastifyReply) {
   const data = createBookingSchema.parse(req.body);
+  const dept = departmentOf(req.user);
+  if (dept) {
+    const svc = await prisma.service.findFirst({ where: { id: data.serviceId, branchId: req.user.branchId }, select: { category: true } });
+    if (svc && svc.category !== dept) throw new AppError(403, `You look after ${dept} only. Ask the other side's team or an owner to book this.`, "FORBIDDEN");
+  }
   return reply.status(201).send(await bookingService.createBooking(req.user.branchId, data, req.user.sub));
 }
 

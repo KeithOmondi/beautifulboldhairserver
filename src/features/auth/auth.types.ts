@@ -12,6 +12,8 @@ export interface AuthUser {
   /** The person's own branch (never changes with switching). */
   homeBranchId?: string;
   canSwitchBranches?: boolean;
+  /** "Lashes" or "Hair & Wigs" for a receptionist or manager who looks after one side only; empty = the whole branch. */
+  department?: string | null;
 }
 
 /**

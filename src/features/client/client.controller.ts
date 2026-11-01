@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import * as clientService from "./client.service";
+import { departmentOf } from "../../utils/access";
 import { createClientSchema, updateClientSchema } from "./client.schema";
 
 /**
@@ -7,7 +8,7 @@ import { createClientSchema, updateClientSchema } from "./client.schema";
  */
 export async function list(req: FastifyRequest, reply: FastifyReply) {
   const { search } = req.query as { search?: string };
-  const clients = await clientService.listClients(req.user.branchId, search);
+  const clients = await clientService.listClients(req.user.branchId, search, departmentOf(req.user));
   return reply.send(clients);
 }
 
@@ -16,7 +17,7 @@ export async function list(req: FastifyRequest, reply: FastifyReply) {
  */
 export async function getById(req: FastifyRequest, reply: FastifyReply) {
   const { id } = req.params as { id: string };
-  const client = await clientService.getClientById(req.user.branchId, id);
+  const client = await clientService.getClientById(req.user.branchId, id, departmentOf(req.user));
   return reply.send(client);
 }
 
@@ -36,6 +37,6 @@ export async function update(req: FastifyRequest, reply: FastifyReply) {
   const { id } = req.params as { id: string };
   const data = updateClientSchema.parse(req.body);
   
-  const client = await clientService.updateClient(req.user.branchId, id, data);
+  const client = await clientService.updateClient(req.user.branchId, id, data, departmentOf(req.user));
   return reply.send(client);
 }
