@@ -17,15 +17,12 @@ export async function handleC2BCallback(branchId: string, payload: C2BCallbackBo
   const phone = `+${payload.MSISDN}`;
   const accountRef = payload.BillRefNumber?.trim() || null;
 
-  console.log(`📥 C2B Callback received: ${receipt} for ${amount} KES from ${phone}. Ref: ${accountRef}`);
-
   // 1. Idempotency: If we've already seen this receipt, accept and exit.
   const existing = await prisma.pendingPayment.findUnique({
     where: { mpesaReceipt: receipt },
   });
 
   if (existing) {
-    console.log(`ℹ️ C2B Callback for ${receipt} already processed.`);
     return { ResultCode: 0, ResultDesc: "Accepted" };
   }
 
@@ -42,7 +39,6 @@ export async function handleC2BCallback(branchId: string, payload: C2BCallbackBo
     });
     if (booking) {
       matchedBookingId = booking.id;
-      console.log(`✅ Auto-matched receipt ${receipt} to booking ${booking.id}`);
     }
   }
 

@@ -14,7 +14,8 @@ export async function sendSms(to: string, message: string, templateKey = "custom
     .catch(() => null);
 
   if (!smsEnabled) {
-    console.log(`[sms:dev] to=${recipient} :: ${message}`);
+    // Only when developing without SMS credentials. Never in production, where messages can carry sign-in codes.
+    if (process.env.NODE_ENV !== "production") console.log(`[sms:dev] to=${recipient} :: ${message}`);
     if (log) {
       await prisma.notificationLog
         .update({ where: { id: log.id }, data: { status: "SENT", sentAt: new Date(), providerId: "console" } })
